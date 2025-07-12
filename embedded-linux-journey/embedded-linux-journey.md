@@ -1,8 +1,8 @@
-# A Beagleplay journey
+# An embedded Linux journey
 
 ## Introduction
 
-This work will detail the integration activities performed on a chosen hardware platform for a specific use case, with a particular focus on boot-time optimization. All the steps will be documented, including mistakes, dead paths and wrong choices, in the hope they can serve as a guide for whoever will be doing the same job.
+This work will detail the integration activities performed on an embedded Linux running on a chosen hardware platform for a specific use case, with a particular focus on boot-time optimization. All the steps will be documented, including mistakes, dead paths and wrong choices, in the hope they can serve as a guide for whoever will be doing the same job.
 
 ### Disclaimer
 
@@ -28,7 +28,7 @@ All trademarks belong to their owners, including (but not limiting to):
 
 The work will focus on the Beagleplay platform, which is widely available at a low cost and already used in a number of different courses, such as the ones [from](https://bootlin.com/training/embedded-linux/) [Bootlin](https://bootlin.com/doc/training/boot-time/) and [from](https://rootcommit.com/training/embedded-linux/) Root Commit. The Beagleplay is based on a AM625 SoC from Texas Instruments and features a rich set of periphrals, including Etherne, Bluetooth/Wifi, RTC and so on. Detailed specifications can be found at the official product page.
 
-A key point of the AM625 SoC, which will be fundamental for the work presented below, is that most of the documentation for it is public, including the Technical Reference Manual[^1]. In the same way, the Beagleplay schematics[^2] are public and released under an open license.
+A key point of the AM625 SoC, which will be fundamental for the work presented below, is that most of the documentation for it is public, including the Technical Reference Manual. In the same way, the Beagleplay schematics are public and released under an open license.
 
 ### Software
 
@@ -231,8 +231,8 @@ The `bmap-writer` application would probably need to be compiled from scratch fo
 
 ## Referenced documents
 
-- [^1]: [AM625 Technical Reference Manual](https://www.ti.com/lit/pdf/spruiv7)
-- [^2]: [Beagleplay Design and Specifications](https://docs.beagleboard.org/boards/beagleplay/03-design.html)
+- [AM625 Technical Reference Manual](https://www.ti.com/lit/pdf/spruiv7)
+- [Beagleplay Design and Specifications](https://docs.beagleboard.org/boards/beagleplay/03-design.html)
 
 ## License
 
