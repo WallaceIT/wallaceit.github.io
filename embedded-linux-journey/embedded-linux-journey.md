@@ -9,6 +9,9 @@ hardware platform for a specific use case, with a particular focus on boot-time 
 All the steps will be documented, including mistakes, dead ends and wrong choices, in the hope they
 can serve as a guide for whoever will be doing the same job.
 
+During the journey, any component or optimization that will be deemed useful for the open source
+community will be sent as a patch for upstream inclusion.
+
 ### Disclaimer
 
 Except when stated differently, the Author is not affiliated with any of the companies or
@@ -16,8 +19,6 @@ organizations mentioned or linked in this work.
 
 All trademarks belong to their owners, including (but not limiting to):
 
-- [Beagleplay](https://www.beagleboard.org/boards/beagleplay) which is a trademark of the
-  BeagleBoard.org Foundation
 - [Linux](http://kernel.org/) which is a trademark of Linux Torvalds
 - [Yocto Project](https://www.yoctoproject.org/) which is a trademark of The Linux Foundation
 
@@ -34,24 +35,30 @@ All trademarks belong to their owners, including (but not limiting to):
 
 ### Hardware
 
-The work will focus on the Beagleplay platform, which is widely available at a low cost and already
-used in a number of different courses, such as the ones [from](https://bootlin.com/training/embedded-linux/)
-[Bootlin](https://bootlin.com/doc/training/boot-time/) and
-[from  Root Commit](https://rootcommit.com/training/embedded-linux/).
-The Beagleplay is based on a AM625 SoC from Texas Instruments and features a rich set of periphrals,
-including Etherne, Bluetooth/Wifi, RTC and so on. Detailed specifications can be found on the
-[official product page](https://www.beagleboard.org/boards/beagleplay).
+The work will focus on the i.MX93 FRDM board, which is widely available at a low cost from the
+major distributors worldwide. This board is based on a i.MX93 SoC from NXP and features a rich set
+of periphrals, including Ethernet, CAN, Bluetooth/Wifi, RTC and so on; it is also well equipped for
+development, as it sports e.g. an on-board USB-serial converter as well as an SD-card for quick
+BSP testing.
 
-A key point of the AM625 SoC, which will be fundamental for the work presented below, is that most
-of the documentation for it is public, including the [Technical Reference Manual](#referenced-documents).
-In the same way, the [Beagleplay schematics](#referenced-documents) are public and released under
-an open license.
+Detailed specifications can be found on the
+[official product page](https://www.nxp.com/design/design-center/development-boards-and-designs/FRDM-IMX93).
+
+A key point of both the chosen board and SoC, which will be fundamental for the work presented below,
+is that most of the documentation for them is public, including the
+[Technical Reference Manual](#referenced-documents) and the [board schematics](#referenced-documents).
+
+> NOTE: the [Beagleplay](https://www.beagleboard.org/boards/beagleplay) platform from the homonym
+> foundation was chosen initially for this work, it being of more widespread usage and covered by a
+> number of high-quality courses; however, the Author believes that the i.MX93 FRDM has more
+> learning opportunities and can be brought to more aggressive boot times (having e.g. an on-board
+> eMMC flash device).
 
 ### Software
 
 The software will be based on a GNU/Linux stack. The Yocto project will be used as build system,
 with custom components developed at need. While most of the techniques presented are portable to any
-build system, the Author believe they are fluent in Yocto and for this reason this framework has
+build system, the Author believe to be fluent in Yocto and for this reason this framework has
 been chosen.
 
 Systemd will be used as init system, as it provides a set of functionalities any sufficiently
@@ -80,6 +87,21 @@ Given this description, features will be tagged as being part of three categorie
 As for the secure boot point, a full chain-of-trust will be designed, with the implementation
 ending whenever blocked by closed tools or destructive actions (such as OTP burning).
 
+## Required materials
+
+- A i.MX93 FRDM board
+- One USB cable, with one type-C connector at one end, to supply power to the board
+- Another USB cable, with one type-C connector at one end, to connect to the on-board USB-serial
+  converter
+- A good quality USB power supply, capable of at least 2A of current (cheap power supplies might be
+  able to supply sufficient power while not having a suitable inrush current capability)
+
+### A note on brand new i.MX93 FRDM boards
+
+Brand new i.MX93 FRDM boards include a full featured OS on the internal eMMC card. For this reason,
+the boot from the microSD card that will be initially used in this article has to be forced.
+This can be done modifying the on-board DIP switches before applying power to the device.
+
 ## The journey
 
 ### Planning
@@ -88,19 +110,15 @@ The work will logically follow four different phases, depicted above; in practic
 back-and-forth will probably take place:
 
 1. Setup of development environment
-2. Customization of the default configuration to implement the [use case](#use-case)
-3. Initial assessment of functionalities and overall performances (including boot time)
+2. Initial assessment of functionalities and overall performances (including boot time)
+3. Customization of the default configuration to implement the [use case](#use-case)
 4. Optimizations
 
-The "optimizations" stage will be further divided in sub-steps:
+The "optimizations" stages will be further divided in sub-steps:
 
 - Kernel optimizations
 - Userspace optimizations
 - Bootloader optimizations
-
-> While logically the bootloader comes first in the boot chain, removing functionalities from it
-> equals to have much less control on what happens next (for example, removing the ability to set
-> kernel command line parameters on-the-fly); for this reason, it will be left as the last task.
 
 ### Setup of development environment
 
@@ -110,32 +128,33 @@ To build the system images using the Yocto project a container image coming from
 [the CROPS project](https://github.com/crops/poky-container) will be used.
 This approach, successfully leveraged by the Author during the last few years, allows to maintain a
 controlled and fully reproducible build environment, that can be moved from one machine to another
-with virtually zero effort. Moreover, it is CI-friendly and has few (if any) cons.
+with virtually zero effort. Moreover, it is CI-friendly and has few (if any) disadvantages.
 
 Given a target location on the (real) host machine of `${HOME}/YOCTO`, the following command is used
 to start the development container using the `Docker` containerization technology:
 
 ```sh
-docker run --rm -i -t --name beagleplay_${USER} --network="host" -v ${HOME}/YOCTO:/work --workdir=/work crops/poky:ubuntu-22.04
+docker run --rm -i -t --name playgrond_${USER} --network="host" -v ${HOME}/YOCTO:${HOME}/YOCTO --workdir=${HOME}/YOCTO crops/poky:ubuntu-22.04
 ```
 
 Let's analyze the different parameters supplied to `docker run`:
 
 - `--rm`: the container image is removed at exit; this is definitely wanted, as it discourages any
   runtime customization to the image and helps in maintaining a reproducible environment;
-- `-i`: Keep STDIN open even if not attached;
-- `-t`: Allocate a pseudo-TTY (allows for a console to be run inside the container);
-- `--name beagleplay_${USER}`: give the `beagleplay_${USER}` name to the container, allowing an
+- `-i`: keep STDIN open even if not attached;
+- `-t`: allocate a pseudo-TTY (allows for a console to be run inside the container);
+- `--name playgrond_${USER}`: give the `playgrond_${USER}` name to the container, allowing an
   easier re-attach after a detach (which can be used in case of long running builds, especially if
   performed on a remote machine); the `${USER}` suffix further helps in a multi-user environment
   (such as a build server);
 - `--network="host"`: use the network interface(s) from the host instead of allocating a dedicated
   NAT'ed one; can simplify operations behind corporate firewalls and proxies and helps debugging
   fetching failures;
-- `-v ${HOME}/YOCTO:/work`: mount the `${HOME}/YOCTO` directory of the host (real) machine into the
-  container under `/work`; this provides persistence of the build artifacts (and it's the reason
-  `--rm` can be used);
-- `--workdir=/work`: automatically move to `/work` once the container is started;
+- `-v ${HOME}/YOCTO:${HOME}/YOCTO`: mount the `${HOME}/YOCTO` directory of the host (real) machine
+  into the container under the same; this provides persistence of the build artifacts (and it's the
+  reason `--rm` can be used); the same path is used to be able to access and use git repositories
+  from outside the conatiner;
+- `--workdir=${HOME}/YOCTO`: automatically move to `${HOME}/YOCTO` once the container is started;
 - `crops/poky:ubuntu-22.04`: image to be used for the container.
 
 It should be noted that under some circumstances, such as sources hosted on private servers,
@@ -155,24 +174,33 @@ Once attached with the command above, the user can detach from the running conta
 `CTL-p` `CTL-q` escape sequence, then re-attach with:
 
 ```sh
-docker attach beagleplay_${USER}
+docker attach playground_${USER}
 ```
 
 #### Clone of meta layers
 
 Here are the Yocto meta layers, along with the chosen git hash, that will be used as a basis.
-The `walnascar` branch will be used for layers that provide it, being this the most recent released
-version of Yocto at the time of writing.
+The `master` (or equivalent) branch will be used for layers that provide it, with frequent updates
+during the journey, to be able to back-feed contributions without any overhead.
 
-| Layer                                                               | Used sub-layers                  | Branch    | Hash                                     | Here because...                                 |
-| ------------------------------------------------------------------- | -------------------------------- | --------- | ---------------------------------------- | ----------------------------------------------- |
-| [poky](https://git.yoctoproject.org/poky)                           | `meta`, `meta-poky`              | walnascar | 41038342a471b4a8884548568ad147a1704253a3 | Basic layer                                     |
-| [meta-openembedded](https://git.openembedded.org/meta-openembedded) | `meta-oe`                        | walnascar | 3c6844219a69d9ca8cb0f1579114efe9a9e2a646 | Dependency of meta-ti                           |
-| [meta-arm](https://git.yoctoproject.org/meta-arm)                   | `meta-arm`, `meta-arm-toolchain` | walnascar | c63ce2117ed9ad720c61a1e2df5d381ca1ac54a2 | Dependency of meta-ti                           |
-| [meta-ti](https://git.yoctoproject.org/meta-ti)                     | `meta-ti-bsp`, `meta-beagle`     | master    | 19aba166544a558e3596de3376f80375e0bd9758 | Contains the `beagleplay` machine configuration |
+| Layer                                                                  | Used sub-layers                  | Branch | Here because...                                          |
+| ---------------------------------------------------------------------- | -------------------------------- | ------ | -------------------------------------------------------- |
+| [openembedded-core](https://git.yoctoproject.org/openembedded-core)    | `meta`                           | master | Basic layer                                              |
+| [meta-yocto](https://git.openembedded.org/meta-yocto)                  | `meta-poky`                      | master | Provider of the `poky` distro                            |
+| [meta-openembedded](https://git.openembedded.org/meta-openembedded)    | `meta-oe`                        | master | Dependency of meta-ti                                    |
+| [meta-arm](https://git.yoctoproject.org/meta-arm)                      | `meta-arm`, `meta-arm-toolchain` | master | Dependency of `meta-freescale` and provider op `OP-TEE`  |
+| [meta-freescale](https://git.yoctoproject.org/meta-freescale)          | No sublayers                     | master | Contains NXP-specific components                         |
+| [meta-linux-mainline](https://github.com/betafive/meta-linux-mainline) | No sublayers                     | master | Allows to build the mainline Linux kernel                |
+
+It is important to note that not all of the sub-layers contained inside the cloned meta layers are
+used; this is the case for example of `meta-yocto/meta-yocto-bsp`, which contains machine
+configurations for the Yocto reference machines and has thus no use in the target configuration.
 
 Meta layers can be cloned directly inside the [running build container](#build-host); once this is
 done, the [build directory](#setup-of-the-build-directory) shall be created.
+
+For sake of order and clarity, the layers should be cloned in a dedicated directory such as `layers`
+and not straight into the work directory.
 
 #### Setup of the build directory
 
@@ -180,13 +208,13 @@ Once the [meta layers](#clone-of-meta-layers) have been cloned, the build direct
 using:
 
 ```sh
-source poky/oe-init-build-env build.beagleplay
+source layers/openembedded-core/oe-init-build-env build.imx9
 ```
 
 This will initialize the build environment will all the required variables and will make `bitbake`
-accessible to the user. The first time it is launched, it will also create the `build.beagleplay`
+accessible to the user. The first time it is launched, it will also create the `build.imx9`
 directory and copy a skeleton configuration under it `conf/` subdirectory, where it can be
-customized. 
+customized.
 
 ##### `bblayers.conf`
 
@@ -194,26 +222,23 @@ The `bblayers.conf` file contains the list of meta layers used by the project; a
 been defined [before](#clone-of-meta-layers), it has to be modified to look more or less like this:
 
 ```
-POKY_BBLAYERS_CONF_VERSION = "2"  
-  
-BBPATH = "${TOPDIR}"  
-BBFILES ?= ""  
-  
-BBLAYERS ?= " \  
- /work/poky/meta \  
- /work/poky/meta-poky \  
- /work/meta-openembedded/meta-oe \  
- /work/meta-arm/meta-arm \  
- /work/meta-arm/meta-arm-toolchain \  
- /work/meta-ti/meta-ti-bsp \  
- /work/meta-ti/meta-beagle \  
- "
-```
+POKY_BBLAYERS_CONF_VERSION = "2"
 
-It is important to note that not all of the sub-layers contained inside the cloned meta layers are
-used; this is the case for example of `poky/meta-yocto-bsp`, which contains machine configurations
-for the Yocto reference machines and has thus no use in the defined configuration (i.e., a system
-running on the Beagleplay).
+BBPATH = "${TOPDIR}"
+BBFILES ?= ""
+
+LAYERDIR ?= "/home/user/YOCTO/layers"
+
+BBLAYERS ?= " \
+  ${LAYERDIR}/openembedded-core/meta \
+  ${LAYERDIR}/meta-yocto/meta-poky \
+  ${LAYERDIR}/meta-openembedded/meta-oe \
+  ${LAYERDIR}/meta-freescale \
+  ${LAYERDIR}/meta-arm/meta-arm-toolchain \
+  ${LAYERDIR}/meta-arm/meta-arm \
+  ${LAYERDIR}/meta-linux-mainline \
+"
+```
 
 ##### `local.conf`
 
@@ -221,12 +246,11 @@ The `local.conf` file holds the build-specific configurations. The explanation o
 key-value pairs would add no value to the current work, and will thus be left to more autoritative
 sources, such as the [official Yocto documentation](https://docs.yoctoproject.org/).
 
-To obtain the initial build for the Beagleplay, the following values shall however be added at the
-bottom of this file:
+To obtain the initial build, the following values shall however be added at the bottom of this file:
 
 ```
-# Target machine is the Beagleplay
-MACHINE = "beagleplay"
+# Target machine is the i.MX93 FRDM, which is not existent: for the time being, fall back to i.MX93 EVK
+MACHINE = "imx93-11x11-lpddr4x-evk"
 
 # The Poky reference distro will be used
 DISTRO = "poky"
@@ -238,9 +262,6 @@ EXTRA_IMAGE_FEATURES = "allow-empty-password empty-root-password allow-root-logi
 
 # Use systemd as init manager
 INIT_MANAGER = "systemd"
-
-# Use systemd-boot as EFI stub
-EFI_PROVIDER = "systemd-boot"
 ```
 
 If the host machine has limited storage, the following configuration can be added to remove all the
@@ -263,14 +284,15 @@ system without introducing too much overhead.
 bitbake core-image-full-cmdline
 ```
 
-> Depending on the speed of the Internet connection and the capabilities of the host machine, this
-> can take an amount of time that can vary from a few minutes to several hours [^1].
+Depending on the speed of the Internet connection and the capabilities of the host machine, this
+will take an amount of time that can vary from a few minutes to several hours [^1].
 
 #### Image flashing
 
-Once built, the gzip'ed image can be found under `build.beagleplay/deploy-ti/images/beagleplay/core-image-full-cmdline-beagleplay.rootfs.wic.gz`. Such image can be written to a microSD card
-using a number of tools; all of them have to be used on the (real) host machine, since the container
-has no access to it.
+Once built, the gzip'ed image can be found under
+`build.imx9/tmp/deploy/images/${MACHINE}/core-image-full-cmdline-${MACHINE}.rootfs.wic.gz`.
+Such image can be written to a microSD card using a number of tools; all of them have to be used on
+the (real) host machine, since the container has no access to it.
 
 ##### Flash using `Balena Etcher`
 
@@ -283,14 +305,14 @@ will no be treated here.
 The `bmaptool` Python application can be used to flash the built image to a microSD:
 
 ```sh
-sudo bmaptool copy ${HOME}/YOCTO/build.beagleplay/deploy-ti/images/beagleplay/core-image-full-cmdline-beagleplay.rootfs.wic.xz /dev/mmcblk0
+sudo bmaptool copy ${HOME}/YOCTO/build.imx9/tmp/deploy/images/${MACHINE}/core-image-full-cmdline-${MACHINE}.rootfs.wic.gz /dev/mmcblk0
 ```
 
 > Here the microSD is assumed to be accessible through `/dev/mmcblk0`; this might need to be
 > adapted to the system at hand.
 
 The `bmaptool` application is available for most GNU/Linux distributions under the `bmap-tools`
-package. Along with the `.wic.gz` image file, it uses the accompanying `.wks` file to write to the
+package. Along with the `.wic.gz` image file, it uses the accompanying `.bmap` file to write to the
 target microSD only the blocks that are really needed (i.e., skipping the empty ones).
 
 #### Flash using `bmap-writer`
@@ -298,21 +320,23 @@ target microSD only the blocks that are really needed (i.e., skipping the empty 
 The `bmap-writer` application can be used to flash the built image to a microSD:
 
 ```sh
-sudo bmap-writer ${HOME}/YOCTO/build.beagleplay/deploy-ti/images/beagleplay/core-image-full-cmdline-beagleplay.rootfs.wic.xz /dev/mmcblk0
+sudo bmap-writer ${HOME}/YOCTO/build.imx9/tmp/deploy/images/${MACHINE}/core-image-full-cmdline-${MACHINE}.rootfs.wic.gz /dev/mmcblk0
 ```
 
 > Here the microSD is assumed to be accessible through `/dev/mmcblk0`; this might need to be
 > adapted to the system at hand.
 
 The `bmap-writer` application would probably need to be compiled from scratch following instructions
-from [its git repository](https://github.com/embetrix/bmap-writer).  Along with the `.wic.gz` image
-file, it uses the accompanying `.wks` file to write to the target microSD only the blocks that are
+from [its git repository](https://github.com/embetrix/bmap-writer). Along with the `.wic.gz` image
+file, it uses the accompanying `.bamp` file to write to the target microSD only the blocks that are
 really needed (i.e., skipping the empty ones).
+
+### To be continued...
 
 ## Referenced documents
 
-- [AM625 Technical Reference Manual](https://www.ti.com/lit/pdf/spruiv7)
-- [Beagleplay Design and Specifications](https://docs.beagleboard.org/boards/beagleplay/03-design.html)
+- [i.MX93 Technical Reference Manual](https://www.nxp.com/webapp/Download?colCode=IMX93RM)
+- [i.MX93 FRDM design files](https://www.nxp.com/webapp/Download?colCode=FRDM-iMX93-DESIGNFILES)
 
 ## License
 
@@ -327,7 +351,7 @@ Except when stated differently, all source code contained in this work is releas
 MIT license:
 
 ```
-Copyright 2025 Francesco Valla
+Copyright 2025-2026 Francesco Valla
 
 Permission is hereby granted, free of charge, to any person obtaining a copy of
 this software and associated documentation files (the “Software”), to deal in
