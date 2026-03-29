@@ -189,7 +189,7 @@ during the journey, to be able to back-feed contributions without any overhead.
 | [meta-yocto](https://git.openembedded.org/meta-yocto)                  | `meta-poky`                      | master | Provider of the `poky` distro                            |
 | [meta-openembedded](https://git.openembedded.org/meta-openembedded)    | `meta-oe`                        | master | Dependency of meta-ti                                    |
 | [meta-arm](https://git.yoctoproject.org/meta-arm)                      | `meta-arm`, `meta-arm-toolchain` | master | Dependency of `meta-freescale` and provider op `OP-TEE`  |
-| [meta-freescale](https://git.yoctoproject.org/meta-freescale)          | No sublayers                     | master | Contains NXP-specific components                         |
+| [meta-freescale](https://github.com/Freescale/meta-freescale)          | No sublayers                     | master | Contains NXP-specific components                         |
 | [meta-linux-mainline](https://github.com/betafive/meta-linux-mainline) | No sublayers                     | master | Allows to build the mainline Linux kernel                |
 
 It is important to note that not all of the sub-layers contained inside the cloned meta layers are
