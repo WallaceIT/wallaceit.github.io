@@ -328,8 +328,81 @@ sudo bmap-writer ${HOME}/YOCTO/build.imx9/tmp/deploy/images/${MACHINE}/core-imag
 
 The `bmap-writer` application would probably need to be compiled from scratch following instructions
 from [its git repository](https://github.com/embetrix/bmap-writer). Along with the `.wic.gz` image
-file, it uses the accompanying `.bamp` file to write to the target microSD only the blocks that are
+file, it uses the accompanying `.bmap` file to write to the target microSD only the blocks that are
 really needed (i.e., skipping the empty ones).
+
+### Day 1: Assessment of the situation
+
+**TL;DR**: the initial assessment of the `meta-freescale` layer showed that support for the i.MX93
+FRDM is absent; before adding it, solving a build issue was deemed necessary.
+In the end, a pull request towards `meta-freescale` was opened with the fix.
+
+A first assessment shows that the i.MX93 FRDM board is not yet supported by the `meta-freescale`
+layer, while being present both in mainline Linux kernel and U-Boot (with the Author being one of
+the reviewer for their inclusion). This support can eventually be included, but it's wise to start
+with a supported target to understand if the build system is set up correclty.
+
+One of the i.MX93 EVKs is the obvious choice, so let's use it inside `local.conf`:
+
+```
+MACHINE = "imx93-11x11-lpddr4x-evk"
+```
+
+A build can now be performed:
+
+```sh
+bitbake core-image-full-cmdline
+```
+
+...with the first error of the journey!
+
+```sh
+| make -f /home/francesco/YOCTO/build.imx9/tmp/work/imx93_11x11_lpddr4x_evk-poky-linux/u-boot-imx/2025.04/sources/u-boot-imx-2025.04/scripts/Makefile.build obj=dts/upstream/src/arm64 dtbs
+|   aarch64-poky-linux-objdump -t u-boot > u-boot.sym
+|   cert-to-efi-sig-list /home/francesco/YOCTO/build.imx9/tmp/work/imx93_11x11_lpddr4x_evk-poky-linux/u-boot-imx/2025.04/sources/u-boot-imx-2025.04/CRT.crt dts/upstream/src/arm64/capsule_esl_file
+| /bin/sh: line 1: cert-to-efi-sig-list: command not found
+|   tools/relocate-rela
+| make[3]: *** [scripts/Makefile.lib:392: dts/upstream/src/arm64/capsule_esl_file] Error 127
+| make[2]: *** [/home/francesco/YOCTO/build.imx9/tmp/work/imx93_11x11_lpddr4x_evk-poky-linux/u-boot-imx/2025.04/sources/u-boot-imx-2025.04/dts/Makefile:60: arch-dtbs] Error 2
+| make[1]: *** [/home/francesco/YOCTO/build.imx9/tmp/work/imx93_11x11_lpddr4x_evk-poky-linux/u-boot-imx/2025.04/sources/u-boot-imx-2025.04/Makefile:1169: dts/dt.dtb] Error 2
+| make[1]: *** Waiting for unfinished jobs....
+| make[1]: Leaving directory '/home/francesco/YOCTO/build.imx9/tmp/work/imx93_11x11_lpddr4x_evk-poky-linux/u-boot-imx/2025.04/build/imx93_11x11_evk_defconfig-sd'
+| make: Leaving directory '/home/francesco/YOCTO/build.imx9/tmp/work/imx93_11x11_lpddr4x_evk-poky-linux/u-boot-imx/2025.04/sources/u-boot-imx-2025.04'
+| make: *** [Makefile:177: sub-make] Error 2
+| ERROR: oe_runmake failed
+| WARNING: /home/francesco/YOCTO/build.imx9/tmp/work/imx93_11x11_lpddr4x_evk-poky-linux/u-boot-imx/2025.04/temp/run.do_compile.2050364:303 exit 1 from 'exit 1'
+| WARNING: Backtrace (BB generated script):
+|       #1: bbfatal_log, /home/francesco/YOCTO/build.imx9/tmp/work/imx93_11x11_lpddr4x_evk-poky-linux/u-boot-imx/2025.04/temp/run.do_compile.2050364, line 303
+|       #2: die, /home/francesco/YOCTO/build.imx9/tmp/work/imx93_11x11_lpddr4x_evk-poky-linux/u-boot-imx/2025.04/temp/run.do_compile.2050364, line 287
+|       #3: oe_runmake, /home/francesco/YOCTO/build.imx9/tmp/work/imx93_11x11_lpddr4x_evk-poky-linux/u-boot-imx/2025.04/temp/run.do_compile.2050364, line 243
+|       #4: uboot_compile_config, /home/francesco/YOCTO/build.imx9/tmp/work/imx93_11x11_lpddr4x_evk-poky-linux/u-boot-imx/2025.04/temp/run.do_compile.2050364, line 226
+|       #5: do_compile, /home/francesco/YOCTO/build.imx9/tmp/work/imx93_11x11_lpddr4x_evk-poky-linux/u-boot-imx/2025.04/temp/run.do_compile.2050364, line 180
+|       #6: main, /home/francesco/YOCTO/build.imx9/tmp/work/imx93_11x11_lpddr4x_evk-poky-linux/u-boot-imx/2025.04/temp/run.do_compile.2050364, line 316
+ERROR: Task (/home/francesco/YOCTO/layers/meta-freescale/recipes-bsp/u-boot/u-boot-imx_2025.04.bb:do_compile) failed with exit code '1'
+```
+
+The `cert-to-efi-sig-list` tool should be provided by the `efitools` package, a collection of tools
+used for manipulation of EFI artifact. Despite the fact that it is quite old (at the time of
+writing, the last commit on the [official repository](https://git.kernel.org/pub/scm/linux/kernel/git/jejb/efitools.git)
+is ~5 years old), there is no sign of a recipe neither in `openembedded-core` nor in
+`meta-openembedded`, meaning that it's probably not much used in a typical build flow.
+
+The [OpenEmbedded Layer Index](https://layers.openembedded.org/layerindex/) shows that an `efitools`
+recipe is provided by the [`meta-efi-secure-boot`](https://layers.openembedded.org/layerindex/branch/master/layer/meta-efi-secure-boot/)
+layer; further researches lead to the conclusion that the same recipe has also been imported into
+`meta-imx`, a layer from NXP which provides further support (and dependencies, and bloat) for the
+i.MX family of processors.
+
+However, the recipe being present elsewhere does not change the fact that the i.MX93 EVK machine is
+unbuildable; let's fix that first, importing only the relevant part of the `efitools` recipe inside
+`meta-freescale` and proposing it for inclusion into mainline.
+According to the README file of the layer, contributions shall be made through Github pull requests,
+hence that flow will be followed.
+
+With the fixes contained into the [pull request](https://github.com/Freescale/meta-freescale/pull/2485),
+the build can now be completed successfully.
+
+Time to start working on proper support for the real target (i.e., the i.MX93 FRDM).
 
 ### To be continued...
 
