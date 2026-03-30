@@ -441,6 +441,7 @@ and flashed to an SD card, a first boot is obtained. Four main stages can be obs
 output of the USB-to-serial adapter (at `/dev/ttyACM0` on the Author's machine):
 
 1. U-Boot SPL
+
 ```
 U-Boot SPL 2025.04-g4ddbad60eff3 (Nov 19 2025 - 07:56:58 +0000)
 PMIC: PCA9451A
@@ -455,7 +456,9 @@ Boot Stage: Primary boot
 image offset 0x8000, pagesize 0x200, ivt offset 0x0
 Load image from 0x57800 by ROM_API
 ```
+
 2. TF-A (that is, Trusted Firmware for A processors)
+
 ```
 NOTICE:  TRDC init done
 NOTICE:  BL31: v2.12.0(release):lf-6.18.2-1.0.0-dirty
@@ -469,7 +472,9 @@ INFO:    BL31: Preparing for EL3 exit to normal world
 INFO:    Entry point address = 0x80200000
 INFO:    SPSR = 0x3c9
 ```
+
 3. U-Boot full (full output omitted for brevity)
+
 ```
 U-Boot 2025.04-g4ddbad60eff3 (Nov 19 2025 - 07:56:58 +0000)
 
@@ -499,7 +504,9 @@ Working FDT set to 83000000
 
 Starting kernel ...
 ```
+
 4. Linux kernel (again, full output omitted)
+
 ```
 [    0.000000] Booting Linux on physical CPU 0x0000000000 [0x412fd050]
 [    0.000000] Linux version 6.18.2-1.0.0-gf49f45233f7b (oe-user@oe-host) (aarch64-poky-linux-gcc (GCC) 15.2.0, GNU ld (GNU Binutils) 2.46) #1 SMP PREEMPT Wed Feb 11 18:37:47 UTC 2026
@@ -511,7 +518,9 @@ Starting kernel ...
 [    3.764456] Freeing unused kernel memory: 2112K
 [    3.769088] Run /sbin/init as init process
 ```
+
 5. systemd init system (again, full output omitted)
+
 ```
 Welcome to Poky (Yocto Project Reference Distro) 5.3.99+snapshot-fff0a8fb3ee6925883b8e662ee2ca6ea33990c10 (wrynose)!
 
@@ -650,7 +659,9 @@ Welcome to Poky (Yocto Project Reference Distro) 5.3.99+snapshot-fff0a8fb3ee6925
          Starting Virtual Console Setup...
 [  OK  ] Finished Virtual Console Setup.
 ```
-6. The login console
+
+6. The login prompt
+
 ```
 Poky (Yocto Project Reference Distro) 5.3.99+snapshot-fff0a8fb3ee6925883b8e662ee2ca6ea33990c10 imx93-11x11-frdm ttyLP0
 
