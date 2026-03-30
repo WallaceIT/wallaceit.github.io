@@ -64,6 +64,9 @@ been chosen.
 Systemd will be used as init system, as it provides a set of functionalities any sufficiently
 complex embedded product would probably need.
 
+If possibile, upstream versions of BSP components (such as the Linux kernel, the bootloader, TF-A
+and Op-TEE) will be used.
+
 ### Use case
 
 By definition, an embedded system cannot cover all use cases. This work will thus focus on one,
@@ -403,6 +406,275 @@ With the fixes contained into the [pull request](https://github.com/Freescale/me
 the build can now be completed successfully.
 
 Time to start working on proper support for the real target (i.e., the i.MX93 FRDM).
+
+### Day 2: Adding support for the i.MX93 FRDM
+
+While not (yet?) supported by `meta-freescale`, the i.MX93 FRDM board is not really different from
+the EVK based on the same SoC; a basic machine file can be derived quite easily:
+
+```
+require include/imx93-evk.inc
+
+IMX_DEFAULT_BOOTLOADER:imx-nxp-bsp = "u-boot-imx"
+IMX_DEFAULT_KERNEL:imx-nxp-bsp = "linux-imx"
+
+KERNEL_DEVICETREE_BASENAME = "imx93-11x11-frdm"
+
+UBOOT_CONFIG_BASENAME = "imx93_11x11_frdm"
+
+DDR_FIRMWARE_NAME = " \
+    lpddr4_dmem_1d_v202201.bin \
+    lpddr4_dmem_2d_v202201.bin \
+    lpddr4_imem_1d_v202201.bin \
+    lpddr4_imem_2d_v202201.bin \
+"
+```
+
+Here it should be noted that the `-imx` variants have been selected both for the Linux kernel and
+the U-Boot bootloader; the community-maintained `-fslc` variants are in fact (at the time of
+writing) based on too-old versions and lack support for the FRDM board. Also considering that the
+goal is to rely on upstream components for both the U-Boot and the kernel, this "limitation" can
+be accepted for the time being.
+
+Once an image compiled for this machine (that will be called `imx93-11x11-frdm`) has been compiled
+and flashed to an SD card, a first boot is obtained. Four main stages can be observed from the
+output of the USB-to-serial adapter (at `/dev/ttyACM0` on the Author's machine):
+
+1. U-Boot SPL
+```
+U-Boot SPL 2025.04-g4ddbad60eff3 (Nov 19 2025 - 07:56:58 +0000)
+PMIC: PCA9451A
+PMIC: Over Drive Voltage Mode
+DDR: 3733MTS
+DDR: 3733MTS
+found DRAM 2GB DRAM matched
+M33 prepare ok
+Normal Boot
+Trying to boot from BOOTROM
+Boot Stage: Primary boot
+image offset 0x8000, pagesize 0x200, ivt offset 0x0
+Load image from 0x57800 by ROM_API
+```
+2. TF-A (that is, Trusted Firmware for A processors)
+```
+NOTICE:  TRDC init done
+NOTICE:  BL31: v2.12.0(release):lf-6.18.2-1.0.0-dirty
+NOTICE:  BL31: Built : 07:53:18, Feb 10 2026
+INFO:    GICv3 without legacy support detected.
+INFO:    ARM GICv3 driver initialized in EL3
+INFO:    Maximum SPI INTID supported: 991
+INFO:    BL31: Initializing runtime services
+INFO:    BL31: Initializing BL32
+INFO:    BL31: Preparing for EL3 exit to normal world
+INFO:    Entry point address = 0x80200000
+INFO:    SPSR = 0x3c9
+```
+3. U-Boot full (full output omitted for brevity)
+```
+U-Boot 2025.04-g4ddbad60eff3 (Nov 19 2025 - 07:56:58 +0000)
+
+Reset Status: POR
+
+CPU:   NXP i.MX93(52) Rev1.1 A55 at 1700 MHz
+CPU:   Industrial temperature grade  (-40C to 105C) at 27C
+Model: NXP FRDM-IMX93
+DRAM:  2 GiB
+BOARD: V1.0(ADC2:689,ADC3:358)
+TCPC:  Vendor ID [0x1fc9], Product ID [0x5110], Addr [I2C2 0x52]
+SNK.Default on CC2
+tcpc_pd_receive_message: Polling ALERT register, TCPC_ALERT_RX_STATUS bit failed, ret = -62
+TCPC:  Vendor ID [0x1fc9], Product ID [0x5110], Addr [I2C2 0x50]
+Core:  229 devices, 32 uclasses, devicetree: separate
+MMC:   FSL_SDHC: 0, FSL_SDHC: 1
+
+<snip>
+
+Booting from mmc ...
+61368 bytes read in 3 ms (19.5 MiB/s)
+## Flattened Device Tree blob at 83000000
+   Booting using the fdt blob at 0x83000000
+Working FDT set to 83000000
+   Using Device Tree in place at 0000000083000000, end 0000000083011fb7
+Working FDT set to 83000000
+
+Starting kernel ...
+```
+4. Linux kernel (again, full output omitted)
+```
+[    0.000000] Booting Linux on physical CPU 0x0000000000 [0x412fd050]
+[    0.000000] Linux version 6.18.2-1.0.0-gf49f45233f7b (oe-user@oe-host) (aarch64-poky-linux-gcc (GCC) 15.2.0, GNU ld (GNU Binutils) 2.46) #1 SMP PREEMPT Wed Feb 11 18:37:47 UTC 2026
+[    0.000000] KASLR disabled due to lack of seed
+[    0.000000] Machine model: NXP FRDM-IMX93
+
+<snip>
+
+[    3.764456] Freeing unused kernel memory: 2112K
+[    3.769088] Run /sbin/init as init process
+```
+5. systemd init system (again, full output omitted)
+```
+Welcome to Poky (Yocto Project Reference Distro) 5.3.99+snapshot-fff0a8fb3ee6925883b8e662ee2ca6ea33990c10 (wrynose)!
+
+[  OK  ] Created slice Slice /system/getty.
+[  OK  ] Created slice Slice /system/modprobe.
+[  OK  ] Created slice Slice /system/serial-getty.
+[  OK  ] Created slice User and Session Slice.
+[  OK  ] Started Dispatch Password Requests to Console Directory Watch.
+[  OK  ] Started Forward Password Requests to Wall Directory Watch.
+         Expecting device /dev/ttyLP0...
+[  OK  ] Reached target NFS client services.
+[  OK  ] Reached target Path Units.
+[  OK  ] Reached target Preparation for Remote File Systems.
+[  OK  ] Reached target Remote File Systems.
+[  OK  ] Reached target Slice Units.
+[  OK  ] Reached target Swaps.
+[  OK  ] Listening on RPCbind Server Activation Socket.
+[  OK  ] Reached target RPC Port Mapper.
+[  OK  ] Listening on Syslog Socket.
+[  OK  ] Listening on Query the User Interactively for a Password.
+[  OK  ] Listening on Credential Encryption/Decryption.
+[  OK  ] Listening on Factory Reset Management.
+[  OK  ] Listening on Journal Socket (/dev/log).
+[  OK  ] Listening on Journal Sockets.
+[  OK  ] Listening on Console Output Muting Service Socket.
+[  OK  ] Listening on Network Management Resolve Hook Socket.
+[  OK  ] Listening on Network Management Varlink Socket.
+[  OK  ] Listening on Network Management Netlink Socket.
+[  OK  ] Listening on Resolve Monitor Varlink Socket.
+[  OK  ] Listening on Resolve Service Varlink Socket.
+[  OK  ] Listening on udev Control Socket.
+[  OK  ] Listening on udev Kernel Socket.
+[  OK  ] Listening on udev Varlink Socket.
+[  OK  ] Listening on User Database Manager Socket.
+         Mounting Huge Pages File System...
+         Mounting POSIX Message Queue File System...
+         Mounting Kernel Debug File System...
+         Mounting Kernel Configuration File System...
+         Starting Load Kernel Module fuse...
+         Starting Journal Service...
+         Mounting NFSD configuration filesystem...
+         Starting Generate Network Units from Kernel Command Line...
+         Starting Remount Root and Kernel File Systems
+         Starting Apply Kernel Variables...
+         Starting Create Static Device Nodes in /dev gracefully...
+         Starting Load udev Rules from Credentials...
+         Starting Coldplug All udev Devices...
+[  OK  ] Started Journal Service.
+[  OK  ] Mounted Huge Pages File System.
+[  OK  ] Mounted POSIX Message Queue File System.
+[  OK  ] Mounted Kernel Debug File System.
+[  OK  ] Mounted Temporary Directory /tmp.
+[  OK  ] Mounted Kernel Configuration File System.
+[  OK  ] Finished Load Kernel Module fuse.
+[  OK  ] Mounted NFSD configuration filesystem.
+[  OK  ] Finished Generate Network Units from Kernel Command Line.
+[  OK  ] Finished Remount Root and Kernel File Systems.
+[  OK  ] Finished Apply Kernel Variables.
+[  OK  ] Finished Create Static Device Nodes in /dev gracefully.
+[  OK  ] Finished Load udev Rules from Credentials.
+         Starting Flush Journal to Persistent Storage...
+         Starting Create System Users...
+[  OK  ] Finished Flush Journal to Persistent Storage.
+         Starting User Database Manager...
+[  OK  ] Started User Database Manager.
+[  OK  ] Finished Create System Users.
+         Starting Network Name Resolution...
+         Starting Network Time Synchronization...
+         Starting Create Static Device Nodes in /dev...
+[  OK  ] Finished Create Static Device Nodes in /dev.
+[  OK  ] Reached target Preparation for Local File Systems.
+         Starting Rule-based Manager for Device Events and Files...
+[  OK  ] Started Network Time Synchronization.
+[  OK  ] Reached target System Time Set.
+[  OK  ] Started Network Name Resolution.
+[  OK  ] Reached target Host and Network Name Lookups.
+[  OK  ] Started Rule-based Manager for Device Events and Files.
+         Mounting /var/volatile...
+[  OK  ] Mounted /var/volatile.
+         Starting Load/Save OS Random Seed...
+[  OK  ] Reached target Local File Systems.
+         Starting Create System Files and Directories...
+         Starting Load JSON user/group Records from Credentials...
+[  OK  ] Finished Load/Save OS Random Seed.
+[  OK  ] Finished Load JSON user/group Records from Credentials.
+[  OK  ] Finished Create System Files and Directories.
+         Starting Rebuild Dynamic Linker Cache...
+         Starting RPC Bind...
+         Starting Rebuild Journal Catalog...
+         Starting Record System Boot/Shutdown in UTMP...
+[  OK  ] Finished Coldplug All udev Devices.
+[  OK  ] Finished Record System Boot/Shutdown in UTMP.
+[  OK  ] Started RPC Bind.
+[  OK  ] Finished Rebuild Journal Catalog.
+[  OK  ] Finished Rebuild Dynamic Linker Cache.
+         Starting Update is Completed...
+[  OK  ] Finished Update is Completed.
+[  OK  ] Reached target System Initialization.
+[  OK  ] Started Daily rotation of log files.
+[  OK  ] Started Daily Cleanup of Temporary Directories.
+[  OK  ] Reached target Timer Units.
+[  OK  ] Listening on D-Bus System Message Bus Socket.
+[  OK  ] Listening on OpenSSH Server Socket (systemd-ssh-generator, AF_UNIX Local).
+         Starting sshd.socket...
+[  OK  ] Listening on Hostname Service Socket.
+[  OK  ] Listening on User Login Management Varlink Socket.
+[  OK  ] Listening on sshd.socket.
+[  OK  ] Reached target Socket Units.
+[  OK  ] Reached target Basic System.
+[  OK  ] Started Job spooling tools.
+[  OK  ] Started Periodic Command Scheduler.
+         Starting D-Bus System Message Bus...
+[  OK  ] Started Getty on tty1.
+         Starting IPv6 Packet Filtering Framework...
+         Starting IPv4 Packet Filtering Framework...
+[  OK  ] Started System Logging Service.
+         Starting User Login Management...
+         Starting OpenSSH Key Generation...
+[  OK  ] Finished IPv6 Packet Filtering Framework.
+[  OK  ] Finished IPv4 Packet Filtering Framework.
+[  OK  ] Found device /dev/ttyLP0.
+[  OK  ] Started User Login Management.
+[  OK  ] Started D-Bus System Message Bus.
+[  OK  ] Finished OpenSSH Key Generation.
+[  OK  ] Reached target Preparation for Network.
+[  OK  ] Started Serial Getty on ttyLP0.
+[  OK  ] Reached target Login Prompts.
+         Starting Network Management...
+[  OK  ] Started Network Management.
+[  OK  ] Reached target Multi-User System.
+[  OK  ] Reached target Network.
+         Starting Enable Persistent Storage in systemd-networkd...
+         Starting Wait for Network to be Online...
+[  OK  ] Finished Enable Persistent Storage in systemd-networkd.
+[  OK  ] Reached target Hardware activated USB gadget.
+         Starting Virtual Console Setup...
+[  OK  ] Finished Virtual Console Setup.
+```
+6. The login console
+```
+Poky (Yocto Project Reference Distro) 5.3.99+snapshot-fff0a8fb3ee6925883b8e662ee2ca6ea33990c10 imx93-11x11-frdm ttyLP0
+
+imx93-11x11-frdm login:
+```
+
+While not printing on its own, traces of the Op-TEE also being present can be found inside the
+Linux kernel message buffer (a.k.a. dmesg):
+
+```
+[    1.644824] optee: probing for conduit method.
+[    1.649327] optee: revision 4.8 (e7ed997213779e3d)
+[    1.649762] optee: dynamic shared memory is enabled
+[    1.659822] optee: initialized driver
+```
+
+The very basic machine file, coupled with the support already present inside the various software
+components, did its magic and brought the system to a complete boot. Something is still missing
+(e.g., kernel modules, for which the directive `IMAGE_INSTALL:append = " kernel-modules" can be
+added to the `local.conf` as a quick-and-dirty solution), but it's satisfying to reach the login
+prompt without fighting with the hardware debugger, for once.
+
+Shall the machine file be contributed to `meta-freescale`? Maybe, but let's wait for the first PR to
+be accepted before rushing to it (or the support wouldn't even be functional).
 
 ### To be continued...
 
