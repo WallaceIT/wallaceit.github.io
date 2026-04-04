@@ -582,6 +582,86 @@ prompt without fighting with the hardware debugger, for once.
 Shall the machine file be contributed to `meta-freescale`? Maybe, but let's wait for the first PR to
 be accepted before rushing to it (or the support wouldn't even be functional).
 
+### Day 3: Boot time measuremernt
+
+Now that the device is booting, it's time to measure the value of the boot time to use as a
+reference for future optimizations.
+
+Among all the methods that can be used to measure the boot time, the "external" one based on
+`grabserial` is probably the simplest one, even if not the most accurate one. It is based on output
+on a serial line and in particular on the time difference between two chosen prints; it is thus
+clear that everything that is not printed cannot be measured, but it's a handy tool that can be used
+for approximated measurements.
+
+Starting `grabserial` as:
+
+```sh
+grabserial --device=/dev/ttyACM0 --baudrate=115200 --time
+```
+
+it can be observed that the total time between the first print and the latest (that is, the login
+prompt) reaches almost 23 seconds:
+
+```
+[0.000001 0.000001]
+[0.000114 0.000113] U-Boot SPL 2025.04-g4ddbad60eff3 (Nov 19 2025 - 07:56:58 +0000)
+[0.011566 0.011452] PMIC: PCA9451A
+[0.011966 0.000400] PMIC: Over Drive Voltage Mode
+
+<snip>
+
+[22.842030 2.022011] Poky (Yocto Project Reference Distro) 5.3.99+snapshot-fff0a8fb3ee6925883b8e662ee2ca6ea33990c10 imx93-11x11-frdm ttyLP0
+[22.843699 0.001669]
+[22.843709 0.000010] Type 'root' to login with superuser privileges (no password will be asked).
+[22.852661 0.008952]
+[22.852698 0.000037] imx93-11x11-frdm login:
+```
+
+This is more or less expected, since the system is printing a lot (and printing to a serial line is
+usually an expensive operation!) and moreover some delay waiting for user input is still present in
+U-Boot.
+
+Speaking of U-Boot, it can be observed that 1/4 of the total time is spent in thebootloading phase,
+while 3/4 is Linux kernel and userspace:
+
+```
+[6.167836 0.000458] Running BSP bootcmd ...
+[6.292699 0.124863] switch to partitions #0, OK
+[6.293553 0.000854] mmc1 is current device
+[6.417961 0.124408] ** No boot file defined **
+[6.802913 0.384952] 36211200 bytes read in 379 ms (91.1 MiB/s)
+[6.803877 0.000964] Booting from mmc ...
+[6.817215 0.013338] 61368 bytes read in 2 ms (29.3 MiB/s)
+[6.818098 0.000883] ## Flattened Device Tree blob at 83000000
+[6.818721 0.000623]    Booting using the fdt blob at 0x83000000
+[6.819060 0.000339] Working FDT set to 83000000
+[6.839662 0.020602]    Using Device Tree in place at 0000000083000000, end 0000000083011fb7
+[6.840230 0.000568] Working FDT set to 83000000
+[6.856365 0.016135] 
+[6.856410 0.000046] Starting kernel ...
+[6.856706 0.000296] 
+[6.875977 0.019271] [    0.000000] Booting Linux on physical CPU 0x0000000000 [0x412fd050]
+```
+
+and in particular, jump to userspace is around the 11 seconds mark:
+
+```
+[11.303824 0.009562] [    3.780903] Freeing unused kernel memory: 2112K
+[11.304881 0.001057] [    3.785588] Run /sbin/init as init process
+```
+
+To summarize, a verbose boot from SD card can roughly be divided in:
+
+| Stage        | Start time (s) | Duration (s) |
+| ------------ | -------------- | ------------ |
+| U-Boot SPL   |  0             |  0.43        |
+| TF-A         |  0.43          |  0.63        |
+| U-Boot full  |  1.06          |  5.85        |
+| Linux kernel |  6.91          |  4.50        |
+| Userspace    | 11.40          | 11.45        |
+
+The full boot captured with `grabserial` can be found [here](files/grabserial_imx_bsp.txt).
+
 ### To be continued...
 
 ## Referenced documents
