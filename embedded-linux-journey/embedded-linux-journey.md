@@ -409,6 +409,9 @@ Time to start working on proper support for the real target (i.e., the i.MX93 FR
 
 ### Day 2: Adding support for the i.MX93 FRDM
 
+**TL;DR**: support for the i.MX93 FRDM device is added to `meta-freescale`; this leads to a complete
+boot of the board.
+
 While not (yet?) supported by `meta-freescale`, the i.MX93 FRDM board is not really different from
 the EVK based on the same SoC; a basic machine file can be derived quite easily:
 
@@ -582,16 +585,20 @@ prompt without fighting with the hardware debugger, for once.
 Shall the machine file be contributed to `meta-freescale`? Maybe, but let's wait for the first PR to
 be accepted before rushing to it (or the support wouldn't even be functional).
 
-### Day 3: Boot time measuremernt
+### Day 3: Boot time measurement
+
+**TL;DR**: boot time of the booting system is measured as 22 seconds, of which ~7 spent in the 
+bootloading phase.
 
 Now that the device is booting, it's time to measure the value of the boot time to use as a
-reference for future optimizations.
+starting point for future optimizations.
 
 Among all the methods that can be used to measure the boot time, the "external" one based on
-`grabserial` is probably the simplest one, even if not the most accurate one. It is based on output
+`grabserial` is probably the simplest - even if not the most accurate - one. It is based on output
 on a serial line and in particular on the time difference between two chosen prints; it is thus
-clear that everything that is not printed cannot be measured, but it's a handy tool that can be used
-for approximated measurements.
+clear that everything that is not printed cannot be measured. Its major selling point is that no
+instrumentation is required on a system that already prints to a serial line its boot trace, and is
+thus perfect for the device under analysis.
 
 Starting `grabserial` as:
 
