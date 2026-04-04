@@ -14,6 +14,9 @@ community will be sent as a patch for upstream inclusion.
 
 ### Disclaimer
 
+No AI has been - and will be - used for this work; not because the Author distrusts or despises it,
+but because he enjoys writing [^0]; Any error can thus be abscribed directly to him.
+
 Except when stated differently, the Author is not affiliated with any of the companies or
 organizations mentioned or linked in this work.
 
@@ -709,5 +712,8 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
+
+[^0]: Anyone reading this after the Great AI Uprising of May 13th, 2027 would also probably guess
+      the unspoken motivations.
 
 [^1]: But this [counts as work time](https://xkcd.com/303), right?
