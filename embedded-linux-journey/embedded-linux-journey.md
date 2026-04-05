@@ -672,12 +672,160 @@ To summarize, a verbose boot from SD card can roughly be divided in:
 
 The full boot captured with `grabserial` can be found [here](files/grabserial_imx_bsp.txt).
 
+### Day 4: Back to theory
+
+**TL;DR**: some theory on the boot flow for the i.MX93 SoC is presented, highlighting that most of
+the components are contained inside SoC-specific structures called _boot containers_.
+
+Before starting to customize the system to reach the final goal, it's worth stopping for a while to
+understand the platform-specific details of it, with a primary focus on the boot sequence.
+
+From the information present on the [Technical Reference Manual](#referenced-documents), the i.MX93
+seems a pretty standard "low-end" ARM64 system, with the "low-" in this denomination coming from the
+fact that no [System Control Processor (SCP)](https://developer.arm.com/documentation/dui0922/g/introduction/the-system-control-processor?lang=en)
+is present; other SoCs from NXP belonging to the same generation (such as the i.MX95) instead
+include one. A Cortex-M33 is indeed present inside the package, but it's meant to be used as an
+auxiliary processor for low-power and/or real-time tasks rather than a SCP.
+
+A part from the main Cortex-A55 cluster and the aforementioned Cortex-M33, a processor dedicated
+to security functionalities called ELE (EdgeLock Enclave) is present. The firmare for this processor
+is loaded as part of the processor boot sequence.
+
+#### Image containers and authenticated boot
+
+During the boot, the ROM code loads firware images from one or more "image containers", a structure
+defined by NXP and containing both data and associated metadata; the images are authenticated before
+the processor they are meant for is started.
+
+Boot authentication is performed by the firmware running on the ELE, using one or more public keys
+written in a OTP (One-Time Programmable) area of the processor. The ELE firmware itself is
+authenticated using a key written by NXP, while other firmwares can be tied to keys written by the
+user.
+
+A image container is composed by a header with some metadata plus one or more data blocks; each of
+the latter is associated with a load address and an entry point, plus some flags. A signature block
+is part of the header and can be used to authenticate the whole container.
+
+During the initial boot phases, the ROM code loads firmware components from either one or two boot
+containers, depending on what it finds on the chosen boot medium; if present, the first one is
+signed by NXP and contains the ELE firmware, while the second is mandatory and contains other
+firmware components. A third container can be also be appended for further loading by firmware
+components (more on this later).
+
+Details on the image containers can be found on the [Technical Reference Manual](#referenced-documents).
+
+#### Boot modes
+
+The startup the ROM code can be configured in two different ways:
+
+- Single Boot: the Cortex-A55 ROM code loads and starts all firmware components, including the
+  Cortex-M33 (if present inside the image container);
+- Low Power Boot: the Cortex-M33 ROM code loads and starts the ELE firmare and the firmware for the
+  Cortex-M33 itself.
+
+The subsequent analysis will focus on the Single Boot mode only.
+
+#### Boot stages
+
+From a firmware/software point-of-view, the following boot flow can be identified:
+
+```mermaid
+
+flowchart TD
+  rom["ROM Code"]
+  ele["ELE firmware"]
+  spl["U-Boot SPL"]
+  m33["Cortex-M33 FW"]
+  tfa["Trusted Firmware A"]
+  optee["OP-TEE"]
+  uboot["U-Boot full"]
+  kernel["Linux kernel"]
+  userspace["systemd/Linux userspace"]
+
+  rom-->ele
+  rom-.->m33
+  rom-->spl
+  spl-->tfa
+  tfa-->optee
+  tfa-->uboot
+  uboot-.->m33
+  uboot-->kernel
+  kernel-.->m33
+  kernel-->userspace
+```
+
+> The ELE firmware is optional, unless a OTP fuse making it mandatory has been burned.
+
+> The Cortex-M33 firmware can be started by one among the ROM code, U-Boot full or the Linux kernel,
+  depending on the usecase.
+
+While the graph above is an acceptable representation of the _logical_ boot flow, it does not show
+who does what in term of actual loading from nonvolatile memory and subsequent authentication.
+In fact, the Trusted Firmware A, the OP-TEE and the U-Boot are all loaded by the SPL from a
+[image container](#image-containers-and-authenticated-boot) (separated from the one containing ELE,
+SPL and CM33 firmwares) through ROM code facilities; an excerpt from `u-boot-imx` (`lf_v2025.04`)
+showing the load function follows (taken from `arch/arm/mach-imx/romapi.c`):
+
+```c
+u32 rom_api_download_image(u8 *dest, u32 offset, u32 size)
+{
+	u32 xor = (uintptr_t)dest ^ offset ^ size;
+	volatile gd_t *sgd = gd;
+	u32 ret;
+
+	ret = g_rom_api->download_image(dest, offset, size, xor);
+	set_gd(sgd);
+
+	return ret;
+}
+```
+
+ Moreover,
+all firmwares loaded from [image containers](#image-containers-and-authenticated-boot) are
+(or, better, can be) authenticated by the ELE firmware after a request to do so by the SPL.
+
+Finally, it shall be noted that not all stages run on the Cortex-A55 at the same level of privilege:
+
+| Stage               | Execution step  | Exception level |
+| ------------------- | --------------- | --------------- |
+| ROM Code            | BL1             | EL3             |
+| U-Boot SPL          | BL2             | EL3             |
+| Trusted Firmware A  | BL31            | EL3             |
+| OP-TEE              | BL32            | Secure EL1      |
+| U-Boot full         | BL33            | Non Secure EL1  |
+| Linux kernel        | BL33            | Non Secure EL1  |
+| Userspace           | BL33            | EL0             |
+
+More details on the execution steps can be found inside the
+[Trusted Firmware documentation](#referenced-documents).
+
+#### Some considerations
+
+From the theoretical analysis presented above, it can be concluded (or at least this is the Author's
+idea) that the boot flow proposed by NXP is heavily platform-dependent and for the loading part
+resolves to calling APIs exposed by the ROM code. While this is not inherently bad, it prevents an
+easy porting of a boot solution from one platform to a different one. Moreover, complex boot schemes
+(e.g.: lower-level bootloader on a boot medium and subsequent stages on another) cannot be obtained
+with these facilities only.
+
+On the authentication part, all components are assumed as being signed by the same key(s) used by
+the initial bootloader (i.e., SPL); again, this is not a limitation _per se_, but can lead to the
+same private key being shared among very different entities.
+
+On the build system side, the image containers are assembled by the `imx-mkimage` tool, which (as
+the name implies) is limited to i.MX processors only; some support exists in mainline U-Boot, at
+the cost of non-trivial build-time dependencies.
+
+The next steps of the journey will necessarily need to take into consideration some of these
+observations.
+
 ### To be continued...
 
 ## Referenced documents
 
 - [i.MX93 Technical Reference Manual](https://www.nxp.com/webapp/Download?colCode=IMX93RM)
 - [i.MX93 FRDM design files](https://www.nxp.com/webapp/Download?colCode=FRDM-iMX93-DESIGNFILES)
+- [Trusted Firmware documentation](https://trustedfirmware-a.readthedocs.io/en/latest/design/firmware-design.html)
 
 ## License
 
