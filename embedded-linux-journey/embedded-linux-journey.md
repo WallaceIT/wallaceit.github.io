@@ -590,7 +590,7 @@ be accepted before rushing to it (or the support wouldn't even be functional).
 
 ### Day 3: Boot time measurement
 
-**TL;DR**: boot time of the booting system is measured as 22 seconds, of which ~7 spent in the 
+**TL;DR**: boot time of the booting system is measured as 22 seconds, of which ~7 spent in the
 bootloading phase.
 
 Now that the device is booting, it's time to measure the value of the boot time to use as a
@@ -647,9 +647,9 @@ while 3/4 is Linux kernel and userspace:
 [6.819060 0.000339] Working FDT set to 83000000
 [6.839662 0.020602]    Using Device Tree in place at 0000000083000000, end 0000000083011fb7
 [6.840230 0.000568] Working FDT set to 83000000
-[6.856365 0.016135] 
+[6.856365 0.016135]
 [6.856410 0.000046] Starting kernel ...
-[6.856706 0.000296] 
+[6.856706 0.000296]
 [6.875977 0.019271] [    0.000000] Booting Linux on physical CPU 0x0000000000 [0x412fd050]
 ```
 
@@ -818,6 +818,221 @@ the cost of non-trivial build-time dependencies.
 
 The next steps of the journey will necessarily need to take into consideration some of these
 observations.
+
+### Day 5: Some more theory, this time with numbers
+
+Given the list of components that are loaded at boot time seen previously, it's now time to
+understand what is loaded where, that is, how the various firmware are placed in memory.
+While the Reference Manual can be of help to determine what are the base addresses of the various
+memories present on the system, it's no good at indicating what the implementor decided to load
+there.
+
+The source of knoweledge in this case shall then be:
+  * the source code for `imx-mkimage`, that is, the tool used to assemble the
+    [image containers](#image-containers-and-authenticated-boot)
+  * the devicetree for the i.MX93 FRDM
+  * the configuration and/or source code for `u-boot-imx`
+
+However, knowing the base addresses of the various memories _is_ useful, so here they are:
+
+| Memory type     | Base address | Size                |
+| --------------- | ------------ | ------------------- |
+| On-chip SRAM    |  0x20480000  | 0x000A0000 (640KiB) |
+| Cortex-M33 TCM  |  0x201E0000  | 0x00040000 (256KiB) |
+| DDR             |  0x80000000  | 0x80000000   (2GiB) |
+
+#### U-Boot
+
+##### SPL
+
+The U-Boot SPL is loaded at `0x2049A000` (and thus in OCRAM) by the ROM code, as this is both the
+address set by the the SPL configuration itself (through the `CONFIG_SPL_TEXT_BASE`) and inside the
+`soc.mak` Makefile for `imx-mkimage`:
+
+```makefile
+SPL_LOAD_ADDR ?= 0x2049A000
+```
+
+Additional memory allocations in OCRAM for the U-Boot SPL are the stack (with `CONFIG_SPL_STACK`
+set to `0x20519dd0`) and the BSS (with `CONFIG_SPL_BSS_START_ADDR` set to `0x2051a000` and its
+maximum size limited to `0x2000` through `CONFIG_SPL_BSS_MAX_SIZE`); the heap is instead placed in
+DDR memory at `0x83200000` for a maximum size of `0x80000` (set respectively through
+`CONFIG_SPL_CUSTOM_SYS_MALLOC_ADDR` and `CONFIG_SPL_SYS_MALLOC_SIZE`).
+
+It is worth noting that no self relocation is performed by the U-Boot SPL.
+
+##### U-Boot full
+
+The U-Boot "full" environemnt is loaded by the SPL at `0x80200000`, following the instructions
+found inside the image container:
+
+```makefile
+UBOOT_LOAD_ADDR ?= 0x80200000
+```
+
+The same address is used inside the configuration:
+
+```
+CONFIG_TEXT_BASE=0x80200000
+```
+
+#### Trusted Firmware A
+
+The Trusted Firmware A is loaded to - and executes from - the OCRAM area; its loading address of
+`0x204E0000` is declared inside the `soc.mak` Makefile for `imx-mkimage` as:
+
+```makefile
+ATF_LOAD_ADDR ?= 0x204E0000
+```
+
+#### OP-TEE
+
+The OP-TEE is loaded to - and executes from - a dedicated DDR portion; its loading address of
+`0x96000000` is declared inside the `soc.mak` Makefile for `imx-mkimage` as:
+
+```makefile
+TEE_LOAD_ADDR ?= 0x96000000
+```
+
+Interestingly enough, no mention of this address is present inside the Linux kernel devicetree nor
+the equivalent devicetree for U-Boot; the latter only has a `/firmware/optee` node:
+
+```dts
+firmware {
+	optee {
+		compatible = "linaro,optee-tz";
+		method = "smc";
+	};
+};
+```
+
+Since a carveout region for this memory is indeed required
+(or the executing U-Boot / Linux system would overwrite OP-TEE data, or worse accessing it), the
+start and size of this region is passed by the TF-A to the U-Boot:
+
+```makefile
+BL32_BASE               ?=      0x96000000
+BL32_SIZE               ?=      0x02000000
+```
+
+```c
+void bl31_early_platform_setup2(u_register_t arg0, u_register_t arg1,
+		u_register_t arg2, u_register_t arg3)
+{
+
+	<...>
+
+	/* Pass TEE base and size to bl33 */
+	bl33_image_ep_info.args.arg1 = BL32_BASE;
+	bl33_image_ep_info.args.arg2 = BL32_SIZE;
+
+	<...>
+}
+```
+
+for a subsequent modification of the Linux kernel devicetree, done by U-Boot full with its
+`optee_copy_fdt_nodes()` function.
+
+#### Cortex-M33 firmware
+
+If included into the image container, the firmware for the Cortex-M33 is loaded at the start of its
+TCM area, i.e., at `0x201E0000`.
+
+> NOTE: the same TCM area has a different base address, equal to `0x0FFE0000`, when accessed by the
+  Cortex-M33.
+
+#### Linux kernel
+
+loadfdt=fatload mmc ${mmcdev}:${mmcpart} ${fdt_addr_r} ${fdtfile}
+The Linux kernel image is loaded by U-Boot full at `0x80400000` (U-Boot's `CONFIG_SYS_LOAD_ADDR`),
+while its FDT binary at `0x83000000` (no confgig option here, but rather the `fdt_addr_r` U-Boot
+environment variable):
+
+```
+fdt_addr_r=0x83000000
+
+loadimage=fatload mmc ${mmcdev}:${mmcpart} ${loadaddr} ${image}
+loadfdt=fatload mmc ${mmcdev}:${mmcpart} ${fdt_addr_r} ${fdtfile}
+```
+
+If booting a signed "OS container" (that the Author has no knoweledge of), this is loaded instead
+at `0x98000000`:
+
+```
+cntr_addr=0x98000000
+
+cntr_file=os_cntr_signed.bin
+loadcntr=fatload mmc ${mmcdev}:${mmcpart} ${cntr_addr} ${cntr_file}
+```
+
+#### Other
+
+##### Inter-Processor communication
+
+Inter-Processor Communication between the Cortex-A55 cluster and the Cortex-M33 happens through
+several shared memory areas:
+
+- two pairs of VirtIO vrings on DDR, covering an area from `0xa4000000` to `0xa4020000`
+- a buffer, also in DDR, from `0xa4020000` to `0xa4120000`
+- the area in which the resource table is stored, from `0x2021e000` to `0x2021f000` (and thus
+  located inside the Cortex-M33 TCM)
+
+These areas are defined inside the Linux kernel's devicetree:
+
+```dts
+vdev0vring0: vdev0vring0@a4000000 {
+	reg = <0 0xa4000000 0 0x8000>;
+	no-map;
+};
+
+vdev0vring1: vdev0vring1@a4008000 {
+	reg = <0 0xa4008000 0 0x8000>;
+	no-map;
+};
+
+vdev1vring0: vdev1vring0@a4010000 {
+	reg = <0 0xa4010000 0 0x8000>;
+	no-map;
+};
+
+vdev1vring1: vdev1vring1@a4018000 {
+	reg = <0 0xa4018000 0 0x8000>;
+	no-map;
+};
+
+rsc_table: rsc-table@2021e000 {
+	reg = <0 0x2021e000 0 0x1000>;
+	no-map;
+};
+
+vdevbuffer: vdevbuffer@a4020000 {
+	compatible = "shared-dma-pool";
+	reg = <0 0xa4020000 0 0x100000>;
+	no-map;
+};
+```
+
+##### DRAM timings stash area
+
+During suspend-to-RAM, the DDR timings are saved into the last portion of the OCRAM at `0x2051c000`.
+
+#### Summary
+
+Summarizing the data seen above, the following table can be derived:
+
+| Component / function  | Start address   | End address   | Memory type | Notes             |
+| --------------------- | --------------- | ------------- | ----------- | ----------------- |
+| Cortex-M33 firmware   | 0x201E0000      | 0x2021E000    | CM33 TCM    | -                 |
+| Cortex-M33 rsc table  | 0x2021E000      | 0x2021F000    | CM33 TCM    | -                 |
+| U-Boot SPL            | 0x2049A000      | 0x204E0000    | OCRAM       | Startup only      |
+| TF-A                  | 0x204E0000      | N/A           | OCRAM       | -                 |
+| DRAM stash area       | 0x2051c000      | 0x20520000    | OCRAM       | -                 |
+| U-Boot full           | 0x80200000      | N/A           | DDR         | Startup only      |
+| Linux kernel image    | 0x80400000      | N/A           | DDR         | -                 |
+| Linux kernel FDT      | 0x83000000      | N/A           | DDR         | -                 |
+| OP-TEE                | 0x96000000      | 0x98000000    | DDR         | -                 |
+| Cortex-M33 IPC vrings | 0xa4000000      | 0xa4020000    | DDR         | -                 |
+| Cortex-M33 buffer     | 0xa4020000      | 0xa4120000    | DDR         | -                 |
 
 ### To be continued...
 
