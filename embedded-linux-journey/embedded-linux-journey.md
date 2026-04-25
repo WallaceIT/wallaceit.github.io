@@ -68,7 +68,7 @@ Systemd will be used as init system, as it provides a set of functionalities any
 complex embedded product would probably need.
 
 If possibile, upstream versions of BSP components (such as the Linux kernel, the bootloader, TF-A
-and Op-TEE) will be used.
+and OP-TEE) will be used.
 
 ### Use case
 
@@ -196,7 +196,6 @@ during the journey, to be able to back-feed contributions without any overhead.
 | [meta-openembedded](https://git.openembedded.org/meta-openembedded)    | `meta-oe`                        | master | Dependency of meta-ti                                    |
 | [meta-arm](https://git.yoctoproject.org/meta-arm)                      | `meta-arm`, `meta-arm-toolchain` | master | Dependency of `meta-freescale` and provider op `OP-TEE`  |
 | [meta-freescale](https://github.com/Freescale/meta-freescale)          | No sublayers                     | master | Contains NXP-specific components                         |
-| [meta-linux-mainline](https://github.com/betafive/meta-linux-mainline) | No sublayers                     | master | Allows to build the mainline Linux kernel                |
 
 It is important to note that not all of the sub-layers contained inside the cloned meta layers are
 used; this is the case for example of `meta-yocto/meta-yocto-bsp`, which contains machine
@@ -242,7 +241,6 @@ BBLAYERS ?= " \
   ${LAYERDIR}/meta-freescale \
   ${LAYERDIR}/meta-arm/meta-arm-toolchain \
   ${LAYERDIR}/meta-arm/meta-arm \
-  ${LAYERDIR}/meta-linux-mainline \
 "
 ```
 
@@ -1033,6 +1031,62 @@ Summarizing the data seen above, the following table can be derived:
 | OP-TEE                | 0x96000000      | 0x98000000    | DDR         | -                 |
 | Cortex-M33 IPC vrings | 0xa4000000      | 0xa4020000    | DDR         | -                 |
 | Cortex-M33 buffer     | 0xa4020000      | 0xa4120000    | DDR         | -                 |
+
+### Day 6: linux-mainline
+
+**TL;DR**: the mainline Linux kernel is used with the help of the `meta-linux-mainline` layer.
+
+Now that the system is booting as expected, it's time to start pursuing the initial goals, one of
+them being the usage of the upstream (i.e.: mainline) Linux kernel.
+
+The [`meta-linux-mainline`](https://github.com/betafive/meta-linux-mainline) Yocto layer provides a
+ready-to-use integration of all the "interesting" kernel versions, that is, all LTSs, latest stable
+and latest mainline (tracking directly the latest tag on Linus' `master` branch); to use it, it's
+sufficient to clone it and add it to `conf/bblayers.conf`:
+
+```
+BBLAYERS:append = " ${LAYERDIR}/meta-linux-mainline"
+```
+
+Then, the right kernel provider shall be set inside `local.conf` (the `:forcevariable` is needed to
+overwrite all the `:use-<whatever>-bsp` logic provided by `meta-freescale`):
+
+```
+PREFERRED_PROVIDER_virtual/kernel:forcevariable = "linux-mainline"
+```
+
+The `virtual/kernel` package alias should now already be configuring the build as required; let's
+see:
+
+```sh
+bitbake virtual/kernel
+
+<...>
+
+0: linux-mainline-7.0-r0 do_fetch - 38s (pid 13144)  25% |#######                      | 4.62 MiB/s
+```
+
+Once the build is complete and the image flashed to the device, it's easy to verify the kernel
+version with the `uname` command:
+
+```
+root@imx93-11x11-frdm:~# uname -a
+Linux imx93-11x11-frdm 7.0.0 #1 SMP PREEMPT Sun Apr 12 20:48:06 UTC 2026 aarch64 GNU/Linux
+```
+
+The time to jump in userspace it's comparable with the one obtained previously with `linux-imx`;
+this was expected, since most of this time is spent before the Linux kernel is even started:
+
+```
+[10.595476 0.009626] [    2.131674] Freeing unused kernel memory: 3328K
+[10.596664 0.001188] [    2.136353] Run /sbin/init as init process
+```
+
+Feature-wise, however, the mainline kernel is not yet complete for the i.MX93 platform; as of
+version 7.0, support for e.g. the video output is still missing, with just
+[tiny bits](https://lore.kernel.org/all/20251215-v6-18-topic-imx93-blkctrl-v3-0-51dbd1333938@pengutronix.de/)
+that still haven't reach mainline. Since version 7.1 should owever be in much better shape, the
+cherry-picking activity will be postponed for a bit.
 
 ### To be continued...
 
