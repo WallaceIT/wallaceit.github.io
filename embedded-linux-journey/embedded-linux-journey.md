@@ -1088,6 +1088,228 @@ version 7.0, support for e.g. the video output is still missing, with just
 that still haven't reach mainline. Since version 7.1 should owever be in much better shape, the
 cherry-picking activity will be postponed for a bit.
 
+### Day 7: Mainline U-Boot
+
+**TL;DR**: the U-Boot used on the system is moved to the tip of the `master` branch after some
+minor struggle.
+
+While a specific Yocto layer exists for the mainline version of the Linux kernel, this is not the
+case for U-Boot. This is not a bad thing, though, since `openembedded-core` tracks closely the
+latest release version of this bootloader.
+
+By default, the `meta-freescale` layer sets `u-boot-imx` as the preferred provider for U-Boot, but
+this can easily be changed through the `local.conf` configuration file:
+
+```
+PREFERRED_PROVIDER_virtual/bootloader:forcevariable = "u-boot"
+UBOOT_CONFIG_BASENAME:forcevariable = "imx93_frdm"
+UBOOT_PROVIDES_BOOT_CONTAINER:forcevariable = "1"
+```
+
+Unfortunately, the defconfig for the i.MX93 FRDM platform has a different name, so the
+`UBOOT_CONFIG_BASENAME` has to be set alongside `PREFERRED_PROVIDER_virtual/bootloader`; moreover,
+U-Boot can be used to replace `imx-mkimage` to supply the platformspecific boot file format (i.e.,
+`imx-boot`) and this ability can be exploited setting `UBOOT_PROVIDES_BOOT_CONTAINER` to `1`.
+
+Unfortunately, the first build with this configuration fails during the compilation step:
+
+```
+| WARNING '/home/francesco/YOCTO/build.imx9/tmp/work/imx93_11x11_frdm-poky-linux/u-boot/2026.01/sources/u-boot-2026.01/bl31.bin' not found, resulting binary may be not-functional
+| WARNING '/home/francesco/YOCTO/build.imx9/tmp/work/imx93_11x11_frdm-poky-linux/u-boot/2026.01/sources/u-boot-2026.01/mx93a1-ahab-container.img' not found, resulting binary may be not-functional
+|   /home/francesco/YOCTO/build.imx9/tmp/work/imx93_11x11_frdm-poky-linux/u-boot/2026.01/sources/u-boot-2026.01/tools/binman/binman   --toolpath ./tools  build -u -d ./u-boot.dtb -O . -m --allow-missing --fake-ext-blobs  -I . -I /home/francesco/YOCTO/build.imx9/tmp/work/imx93_11x11_frdm-poky-linux/u-boot/2026.01/sources/u-boot-2026.01 -I /home/francesco/YOCTO/build.imx9/tmp/work/imx93_11x11_frdm-poky-linux/u-boot/2026.01/sources/u-boot-2026.01/board/freescale/imx93_frdm -I arch/arm/dts -a of-list="imx93-11x11-frdm"  -a atf-bl1-path= -a atf-bl31-path= -a tee-os-path= -a ti-dm-path= -a opensbi-path= -a default-dt="imx93-11x11-frdm" -a scp-path= -a rockchip-tpl-path= -a spl-bss-pad= -a tpl-bss-pad=1 -a vpl-bss-pad=1 -a spl-dtb=y -a tpl-dtb= -a vpl-dtb= -a pre-load-key-path= -a of-spl-remove-props="interrupt-parent interrupts"
+| Image 'u-boot-spl-ddr' is missing external blobs and is non-functional: ddr-1d-imem-fw ddr-1d-dmem-fw ddr-2d-imem-fw ddr-2d-dmem-fw
+|
+| /binman/u-boot-spl-ddr/ddr-1d-imem-fw (lpddr4_imem_1d_v202201.bin):
+|    Missing blob
+|
+| /binman/u-boot-spl-ddr/ddr-1d-dmem-fw (lpddr4_dmem_1d_v202201.bin):
+|    Missing blob
+|
+| /binman/u-boot-spl-ddr/ddr-2d-imem-fw (lpddr4_imem_2d_v202201.bin):
+|    Missing blob
+|
+| /binman/u-boot-spl-ddr/ddr-2d-dmem-fw (lpddr4_dmem_2d_v202201.bin):
+|    Missing blob
+|
+| Image 'u-boot-spl-ddr' has faked external blobs and is non-functional: lpddr4_imem_1d_v202201.bin lpddr4_dmem_1d_v202201.bin lpddr4_imem_2d_v202201.bin lpddr4_dmem_2d_v202201.bin
+
+<...>
+
+ERROR: Task (/home/francesco/SRC/YOCTO2/layers/openembedded-core/meta/recipes-bsp/u-boot/u-boot_2026.01.bb:do_compile) failed with exit code '1'
+```
+
+This is not really unexpected, given the number of artifacts that are required for a complete build
+of the aforementioned `u-boot-imx` boot image. Digging through the `meta-freescale` recipes, it
+seems that a dedicated `imx-boot-container.bbclass` is there to help with this kind of dependency,
+along with another (`uuu_bootloader_tag.bbclass`) for "proper" SD card support.
+
+Let's try to add these classes through a `.bbappend` file right inside `meta-freescale`, under
+`recipes-bsp/u-boot/u-boot_%.bbappend`:
+
+```
+inherit imx-boot-container
+inherit uuu_bootloader_tag
+```
+
+...just to fall into another error condition:
+
+```
+ERROR: u-boot-1_2026.01-r0 do_deploy_setscene: Recipe u-boot is trying to install files into a shared area when those files already exist. The files and the manifests listing them are:
+  /home/francesco/SRC/YOCTO/build.imx9/tmp/deploy/images/imx93-11x11-frdm/imx-boot
+    (matched in manifest-imx93_11x11_frdm-imx-boot.deploy
+manifest-imx93_11x11_frdm-imx-atf.deploy)
+  /home/francesco/SRC/YOCTO/build.imx9/tmp/deploy/images/imx93-11x11-frdm/imx-boot.tagged
+    (matched in manifest-imx93_11x11_frdm-imx-boot.deploy)
+Please adjust the recipes so only one recipe provides a given file.
+```
+
+This is again not really unexpected: now both the `imx-boot` and `u-boot` recipes are providing the
+boot files, and Bitbake is sufficiently advanced to notice this and complain about it. A proper
+solution could probably be crafted through a `PREFERRED_PROVIDER` definition, but let's just solve
+the issue for the time being:
+
+```
+bitbake -c cleanall imx-boot
+bitbake core-image-full-cmdline
+```
+
+After flashing the freshly built `core-image-full-cmdline` to the SD card, is time to turn on the
+device and boot:
+
+```
+U-Boot SPL 2026.01 (Jan 05 2026 - 20:49:22 +0000)
+PMIC: Over Drive Voltage Mode
+DDR: 3733MTS
+DDR: 3733MTS
+found DRAM 2GB DRAM matched
+M33 prepare ok
+Normal Boot
+Trying to boot from BOOTROM
+Boot Stage: Primary boot
+image offset 0x8000, pagesize 0x200, ivt offset 0x0
+Load image from 0x51800 by ROM_API
+NOTICE:  TRDC init done
+NOTICE:  BL31: v2.12.0(release):lf-6.18.2-1.0.0
+NOTICE:  BL31: Built : 07:53:18, Feb 10 2026
+```
+
+And that's all. SPL clearly starts, as well as the TF-A firmware, but then nothing.
+
+#### A tale of two U-Boot flavours
+
+After a short but painful debug session, the reason behind the boot hang reveals itself: the
+mainline U-Boot version does not support the loading of OP-TEE, and thus the TF-A hangs when
+trying to start it; the U-Boot flavour shipped with `u-boot-imx`, as well as the boot files
+produced by `imx-boot`, are instead including it, and this explains why the mix-up is not working.
+
+Let's put OP-TEE aside for the moment, as it would require another entire journey to be explored,
+and just go without it; this can be obtained simply removing it from the `MACHINE_FEATURES`, another
+task that can be delegated to the `local.conf`:
+
+```
+MACHINE_FEATURES:remove = "optee"
+```
+
+A compilation round later, the device is now booting:
+
+```
+U-Boot 2026.01 (Apr 26 2026 - 13:46:01 +0000)
+
+Reset Status: POR
+
+CPU:   NXP i.MX93(52) Rev1.1 A55 at 1700 MHz
+CPU:   Industrial temperature grade (-40C to 105C) at 31C
+Model: NXP i.MX93 11X11 FRDM board
+DRAM:  2 GiB
+Core:  197 devices, 23 uclasses, devicetree: separate
+WDT:   Started wdog@42490000 with servicing every 1000ms (40s timeout)
+MMC:   FSL_SDHC: 0, FSL_SDHC: 1
+Loading Environment from MMC... Reading from MMC(1)... *** Warning - bad CRC, using default environment
+
+In:    serial@44380000
+Out:   serial@44380000
+Err:   serial@44380000
+switch to partitions #0, OK
+mmc1 is current device
+Net:   No ethernet found.
+Hit any key to stop autoboot: 0
+Scanning for bootflows in all bootdevs
+Seq  Method       State   Uclass    Part  Name                      Filename
+---  -----------  ------  --------  ----  ------------------------  ----------------
+Scanning global bootmeth 'efi_mgr':
+Cannot persist EFI variables without system partition
+  0  efi_mgr      ready   (none)       0  <NULL>
+** Booting bootflow '<NULL>' with efi_mgr
+Loading Boot0000 'mmc 1' failed
+Loading Boot0001 'mmc 0' failed
+EFI boot manager: Cannot load any image
+Boot failed (err=-14)
+Scanning bootdev 'mmc@42850000.bootdev':
+Scanning bootdev 'mmc@42860000.bootdev':
+No more bootdevs
+---  -----------  ------  --------  ----  ------------------------  ----------------
+(1 bootflow, 1 valid)
+Running BSP bootcmd ...
+switch to partitions #0, OK
+mmc1 is current device
+41773568 bytes read in 1749 ms (22.8 MiB/s)
+37214 bytes read in 4 ms (8.9 MiB/s)
+## Flattened Device Tree blob at 83000000
+   Booting using the fdt blob at 0x83000000
+Working FDT set to 83000000
+   Loading Device Tree to 000000008fff3000, end 000000008ffff15d ... OK
+Working FDT set to 8fff3000
+
+Starting kernel ...
+```
+
+The output of `grabserial` shows that slightly less than 3 seconds have also been removed from the
+boot time - but the lack of OP-TEE shall be considered:
+
+```
+[7.658198 0.000961] [    2.576516] Run /sbin/init as init process
+```
+
+#### Moving to "real" upstream U-Boot
+
+The U-Boot version supplied by `openembedded-core` at the time of writing is the `v2026.01` tag;
+while more recent than the one supplied by `u-boot-imx` (`v2025.04`), it does not satisfy the
+Author's definition of "upstream". Let's then move to the tip of the `master` branch, again with
+the help of `local.conf`:
+
+```
+# Use tip of master branch for U-Boot
+SRC_URI:pn-u-boot = "git://source.denx.de/u-boot/u-boot.git;protocol=https;branch=master"
+SRCREV:pn-u-boot = "${AUTOREV}"
+```
+
+> NOTE: this is NOT suitable for a production environment, as (among other things) forces Bitbake
+  to contact the remote repository at each recipe parsing.
+
+Yet another build error related to the `mkeficapsule` tool leads to the discovery of
+[a patch](https://lore.kernel.org/all/20260408130553.819420-1-fra.schnyder@gmail.com/)
+still not merged to `openembedded-core` thougth for this very error on U-Boot versions greater
+than `v2026.04`; since this is the case, a fixup can be applied again inside the `local.conf`:
+
+```
+# Add P11 support to GnuTLS for mainline U-Boot
+PACKAGECONFIG:append:pn-gnutls-native = " p11-kit"
+```
+
+Another round of compilation + flashing leads then to a successful boot:
+
+```
+U-Boot SPL 2026.04 (Apr 24 2026 - 18:49:27 +0000)
+```
+
+Strangely enough, another second or so of boot time was shaved - this will need to be investigated
+thoroughly, sooner or later:
+
+```
+[6.377049 0.009204] [    2.248497] Freeing unused kernel memory: 3328K
+[6.378045 0.000997] [    2.253164] Run /sbin/init as init process
+```
+
 ### To be continued...
 
 ## Referenced documents
