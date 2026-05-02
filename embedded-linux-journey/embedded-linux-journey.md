@@ -2,6 +2,8 @@
 
 > **WARNING**: this is a Work In Progress! The content is subject to change with no notice.
 
+**Last update**: 2026-05-02
+
 ## Introduction
 
 This work will detail the integration activities performed on an embedded Linux running on a chosen
