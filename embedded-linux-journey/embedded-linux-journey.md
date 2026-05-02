@@ -15,7 +15,7 @@ community will be sent as a patch for upstream inclusion.
 ### Disclaimer
 
 No AI has been - and will be - used for this work; not because the Author distrusts or despises it,
-but because he enjoys writing [^0]; Any error can thus be abscribed directly to him.
+but because he enjoys writing [^0]; any error can thus be abscribed directly to him.
 
 Except when stated differently, the Author is not affiliated with any of the companies or
 organizations mentioned or linked in this work.
@@ -1310,6 +1310,485 @@ thoroughly, sooner or later:
 [6.378045 0.000997] [    2.253164] Run /sbin/init as init process
 ```
 
+### Day 8: the Falconer
+
+**TL;DR**: U-Boot's Falcon boot mode is briefly analyzed, then implemeted using Yocto-provided FIT
+as boot image.
+
+Now that the upstream u-boot is booting, it's time to move from a regular, U-Boot-proper based boot
+to the so-called Falcon boot, in which is the SPL that acts as the sole bootloader.
+
+> NOTE: most boot time optimization guides suggest to start optimizing from the end of the boot
+  sequence (i.e.: the userspace application) and then proceed backwards, with the bootloader being
+  the latest component to trim down. While agreeing in principle, the Author decided to start from
+  the U-Boot, hoping that more control on the first boot elements would simplify the entire
+  optimization task.
+
+#### Some theoretical background
+
+The Falcon boot is a mode of operation in which the SPL does not load the U-Boot proper image, but
+instead the Linux kernel. The goal is to reduce the amount of code executed during the very first
+stages, at the expense of less flexibility (as the U-Boot console is not there) and more custom code
+(since most Falcon boot implementations require some arch- or board-specific logic).
+
+Just like a regular boot, the Falcon boot can load and start the Linux kernel in a number of way,
+including raw images (i.e., Image + DTB), a FIT image (more on that later) or the plethora of
+platform-specific boot image formats.
+
+More details can be found in [the U-Boot documentation about Falcon Mode](#referenced-documents)
+
+#### What about the i.MX93?
+
+On the i.MX93, enabling the Falcon boot would mean to have the TF-A start the Linux kernel instead
+of the U-Boot binary:
+
+| Before (regular boot)                             | After (Falcon boot)                     |
+| ------------------------------------------------- | --------------------------------------- |
+| SPL -> TF-A -> (OP-TEE) -> U-Boot -> Linux kernel | SPL -> TF-A -> (OP-TEE) -> Linux kernel |
+
+Turns out that, while not included in the sourfce code from NXP by default, an
+[application note](https://docs.nxp.com/bundle/AN14093/page/topics/bootloader_optimizations.html)
+and an associated [Yocto layer](https://github.com/nxp-imx-support/meta-imx-fastboot) exists to
+enable Falcon boot for the i.MX93. Unfortunately, the approach proposed there has at least three
+limitations:
+  - it is based on an outdated U-Boot version (at the time of writing, `v2025.04`);
+  - it exploits a lot of platform-specific components, including `imx-mkimage` for the i.MX boot
+    image format (i.e., `imx-boot`);
+  - secure boot is supported only partially, with a far-from-clear status.
+
+After some consideration, the Author decided to opt for a more generic approach based on FIT images.
+A part from the points above, this solution would also bring much more separation of concerns
+between the bootloader (SPL) and the other application-specific components (from the TF-A onward),
+being them physically separated in memory instead of crammed inside the same boot image.
+
+#### What's a FIT, anyway?
+
+FIT is the acronym for Flattened Image Tree and indicates a binary file format used to store boot
+files and associated configuration; different types of binaries, each one with its associated
+metadata, are grouped in ore or more configurations for the bootloader to load.
+The [FIT specifications](#referenced-documents), once part of the U-Boot tree, are now maintained
+by the Open Source Firmware Foundation; version 1.0 was released mid-April of 2026 [^2], but the
+original draft dates way back.
+
+A FIT image can be generated starting from a devicetree source file (`.its`), where a specific
+format is used to specify what binaries shall be included and where they shall be loaded by the
+bootloader loading the FIT itself. Integrity and authenticity can be verified through a per-node or
+per-configuration hash and associated signature.
+
+It's the Author's opinion that FIT images should be preferred to plain "raw" images for a number of
+reasons, including:
+  - a FIT image can be engineered to contain all artifacts needed for a system, reducing the risk of
+    misalignment among them;
+  - there is native support for integrity and authenticity verification;
+  - the format can easily be inspected using widely available tools (i.e., the devicetree compiler).
+
+The Yocto project had supported FIT image creation since a long time.
+[Quite recently](https://lists.openembedded.org/g/openembedded-core/message/217774), the support in
+`openembedded-core` has been overhauled and made more flexible, and is now based on a
+[`kernel-fit-image` class](https://docs.yoctoproject.org/ref-manual/classes.html#ref-classes-kernel-fit-image)
+that can be inherited to create custom FIT images, with the `linux-yocto-fitimage` being a
+general-purpose implementation. The Author himself contributed a
+[small enhancement](https://lists.openembedded.org/g/openembedded-core/message/232145) to this class
+meant to support the inclusion of arbitary loadables in a FIT image.
+
+Another [alternative FIT image generation class](https://github.com/openembedded/meta-openembedded/blob/master/meta-oe/classes/fitimage.bbclass)
+exists in `meta-oe`, with slightly different capabilities.
+
+#### Changes to U-Boot
+
+A number of tweaks are required in U-Boot to support the complex boot flow required for the i.MX93:
+  - the bootloader shall be configured to boot from a FIT image, loading from it the Linux kernel,
+    its devicetree blob and the TF-A binary (and maybe more, since OP-TEE support is in scope);
+  - the kernel devicetree will need to be modified by the SPL just as the U-Boot proper does (e.g.,
+    marking selected memory areas as reserved);
+  - a dynamic kernel command line will need to be injected in the kernel devicetree.
+
+The `SPL_OS_BOOT` configuration has to be enabled, but it won't be sufficient; the "simple" FIT
+loading logic selcted by `CONFIG_SPL_LOAD_FIT` is not sufficient, as it does not load additional
+firmware besides the kernela and the devicetree, and thus the "full" logic has to be selected
+through `CONFIG_SPL_LOAD_FIT_FULL`. Since modifications of the loaded devicetree are foreseen,
+`CONFIG_SPL_OF_LIBFDT` shall be selected as well.
+
+After some preliminary code inspection and some trial-and-error (here omitted for brevity) a number
+of small issues has been identified in the "full" FIT loading logic logic, and corresponding patches
+has been sent to the U-Boot mailing list:
+
+1. [boot: fit: fix FIT verification in SPL](https://lore.kernel.org/u-boot/20260428-spl_fit_full-v1-0-dde63beeaab1@valla.it/T/#me8cae4005b62a58a89d95cdfe4b6bf797a13110e)
+2. [boot: fit: decompress kernel when in SPL](https://lore.kernel.org/u-boot/20260428-spl_fit_full-v1-0-dde63beeaab1@valla.it/T/#m958cda83d348bde00a0f7c3830f4f12205453f2d)
+3. [boot: fit: enable FIT image post-processing in SPL](https://lore.kernel.org/u-boot/20260428-spl_fit_full-v1-0-dde63beeaab1@valla.it/T/#m3d6b80b7bfd760675c8b66c865619458056f271c)
+4. [spl: call ft_board_setup() and ft_system_setup() if enabled](https://lore.kernel.org/u-boot/20260428-spl_fit_full-v1-0-dde63beeaab1@valla.it/T/#m1964025df056e81cb0eaaa32512b55a9bd1657eb)
+5. [spl: fit: add ramdisk load](https://lore.kernel.org/u-boot/20260428-spl_fit_full-v1-0-dde63beeaab1@valla.it/T/#me5715db4e824f7db2c1a497af4faa609717bc4e8)
+
+Additional changes has to be performed at arch- and board-level:
+
+* `arch/arm/mach-imx/imx9/soc.c`: a combination of arch fixup and FIT post-process is used to
+  select the TF-A as the image to start after the SPL:
+```c
+/* If booting from a FIT image, try to extract the TF-A load address and use
+ * it as entrypoint instead of the kernel one. */
+
+static ulong tfa_load_address = 0UL;
+
+void board_fit_image_post_process(const void *fit, int node, void **p_image,
+				  size_t *p_size)
+{
+	const char *value;
+	u32 addr;
+	int len;
+
+	value = fdt_getprop(fit, node, "os", &len);
+	if (!value)
+		return;
+
+	switch (genimg_get_os_id(value)) {
+	case IH_OS_ARM_TRUSTED_FIRMWARE:
+		addr = fdt_getprop_u32_default_node(fit, node, 0, "load", 0);
+		if (addr != 0) {
+			tfa_load_address = (ulong)addr;
+			debug("%s: TF-A load address is %08lX\n", __func__,
+			      tfa_load_address);
+		} else {
+			printf("%s: failed to get TF-A load address\n", __func__);
+		}
+		return;
+	default:
+		break;
+	}
+}
+
+void spl_perform_arch_fixups(struct spl_image_info *spl_image)
+{
+	/* Jump to Linux through the TF-A */
+	if (spl_image->os == IH_OS_LINUX && tfa_load_address != 0) {
+		spl_image->os = IH_OS_ARM_TRUSTED_FIRMWARE;
+		spl_image->entry_point = tfa_load_address;
+	}
+}
+```
+* `board/nxp/imx93_frdm/spl.c`: the boot device has to be selected correctly (default implementation
+   uses the ROM-loaded binaries):
+```c
+int spl_board_boot_device(enum boot_device boot_dev_spl)
+{
+	switch (boot_dev_spl) {
+	case SD1_BOOT:
+	case MMC1_BOOT:
+		return BOOT_DEVICE_MMC1;
+	case SD2_BOOT:
+	case MMC2_BOOT:
+		return BOOT_DEVICE_MMC2;
+	default:
+		return BOOT_DEVICE_BOOTROM;
+	}
+}
+
+void board_boot_order(u32 *spl_boot_list)
+{
+	spl_boot_list[0] = spl_boot_device();
+	spl_boot_list[1] = BOOT_DEVICE_BOOTROM;
+}
+```
+* `board/nxp/imx93_frdm/spl.c`: the correct root device has to be injected into the Linux kernel
+  devicetree (this is typically done by U-Boot proper reading the `bootargs` environment variable):
+```c
+#if IS_ENABLED(CONFIG_OF_BOARD_SETUP) && CONFIG_IS_ENABLED(OF_LIBFDT)
+const char *board_fdt_chosen_bootargs(const struct fdt_property *fdt_ba)
+{
+	char bootargs[256] = "console=ttyLP0,115200";
+
+	const char *rootarg;
+
+	switch (spl_boot_device()) {
+	case BOOT_DEVICE_MMC1:
+		rootarg = " root=/dev/mmcblk0p2 rootwait";
+		break;
+	case BOOT_DEVICE_MMC2:
+	case BOOT_DEVICE_MMC2_2:
+	default:
+		rootarg = " root=/dev/mmcblk1p2 rootwait";
+		break;
+	}
+
+	return strncat(bootargs, rootarg, sizeof(bootargs) - strlen(bootargs) - 1);
+}
+
+int ft_board_setup(void *blob, struct bd_info *bd)
+{
+	return fdt_chosen(blob);
+}
+#endif
+```
+* caches have to be enabled, or the access to DRAM will take ages;
+* misc fixups have to be applied for the system to work correctly.
+
+A patch with all the required changes follows:
+
+1. [i.MX93 FRDM Falcon boot](files/0001-i.MX93-FRDM-Falcon-boot.patch)
+
+> NOTE: this patch is not suitable for upstream submission, both because of its
+  shape (it would need to be divided into atomic chunks) and its contents (that
+  would have to be refined). Its submission will thus be postponed.
+
+In addition to code changes, various configuration options have to be set for the Falcon boot to
+work; they are presented below:
+
+```
+# Bump maximum size for SPL to the available space
+CONFIG_SPL_MAX_SIZE=0x46000
+
+# Enable Falcon mode
+CONFIG_SPL_OS_BOOT=y
+CONFIG_SPL_OS_BOOT_SECURE=y
+# CONFIG_SPL_OS_BOOT_ARGS is not set
+
+# Support loading of FIT image from FAT-partitioned MMC/SD device
+CONFIG_SPL_MMC=y
+# CONFIG_SPL_MMC_TINY is not set
+# CONFIG_SPL_MMC_WRITE is not set
+CONFIG_MMC_BROKEN_CD=y
+CONFIG_SPL_FS_FAT=y
+CONFIG_SPL_FS_FAT_DMA_ALIGN=y
+CONFIG_SPL_FS_LOAD_PAYLOAD_NAME="u-boot-atf-container.img"
+CONFIG_SPL_FS_LOAD_KERNEL_NAME="fitImage"
+# CONFIG_SPL_FALCON_BOOT_MMCSD is not set
+CONFIG_SYS_MMCSD_FS_BOOT=y
+CONFIG_SYS_MMCSD_FS_BOOT_PARTITION=1
+
+# FIT image load address
+CONFIG_SYS_LOAD_ADDR=0x90000000
+
+# Devicetree load address
+CONFIG_SPL_PAYLOAD_ARGS_ADDR=0x83000000
+
+# SPL FIT "full" support
+CONFIG_FIT=y
+CONFIG_FIT_FULL_CHECK=y
+CONFIG_SPL_FIT=y
+CONFIG_SPL_FIT_IMAGE_POST_PROCESS=y
+CONFIG_SPL_FIT_PRINT=y
+CONFIG_SPL_FIT_SIGNATURE=y
+# CONFIG_SPL_FIT_IMAGE_TINY is not set
+CONFIG_SPL_LOAD_FIT=y
+CONFIG_SPL_LOAD_FIT_FULL=y
+
+# FIT integrity and authenticity
+CONFIG_SHA512=y
+CONFIG_SPL_SHA512=y
+CONFIG_SPL_RSA=y
+CONFIG_SPL_RSA_VERIFY=y
+
+# Devicetree post processing
+CONFIG_SPL_OF_LIBFDT=y
+CONFIG_OF_LIBFDT_OVERLAY=y
+
+# Board-level support for Falcon boot
+CONFIG_OF_BOARD_SETUP=y
+
+# Support for TF-A
+CONFIG_SPL_ATF=y
+
+# Support for LZO-compressed kernel
+CONFIG_SPL_LZO=y
+```
+
+It is useful to explain some of them (in the hope comments above are enough for the others):
+
+* `CONFIG_SPL_MAX_SIZE=0x46000`: In the standard i.MX93 configuration the SPL size is capped at
+  `0x26000` (152KiB); this is probably a leftover from the i.MX8 family, since the size of the
+  on-chip SRAM is way bigger, also considering the space reserved for the ROM code.
+  Bump it to 280KiB, to occupy all the space between it load address and the TF-A one (see the
+  [previous explanation](#summary) on load addresses for details); the FIT "full" loading logic
+  needs in fact much more space.
+* `CONFIG_SPL_OS_BOOT=y` and `CONFIG_SPL_OS_BOOT_SECURE=y`: Enable secure Falcon boot.
+* `CONFIG_SPL_FS_LOAD_KERNEL_NAME=fitImage`: Load a file named `fitImage` as the "kernel" payload.
+* `CONFIG_SPL_FS_LOAD_PAYLOAD_NAME="u-boot-atf-container.img"`: Load a file named
+  `u-boot-atf-container.img` in case the "kernel" payload is not found (and thus U-Boot proper
+  needs to be loaded instead).
+* `CONFIG_SYS_LOAD_ADDR=0x90000000`: Load the "kernel" payload at `0x90000000`; this is an arbitrary
+  address chosen to be away from the real load addresses for kernel, devicetree and so on, since
+  the SPL will need to load somewhere the FIT image before being able to copy images to their
+  proper address.
+* `# CONFIG_SPL_FALCON_BOOT_MMCSD is not set`: Loading of boot image from "raw" MMCSD (i.e., without
+  the use of partitions) is not required.
+
+#### Changes to TF-A
+
+The TF-A needs a small - albeit fundamental - change, due to the way the Linux kernel boots on an
+ARM64 processor. The devicetree address is in fact expected as `arg0`, but the TF-A does not pass
+it by default; a small patch is thus neded:
+
+1. [feat(imx93): pass FDT address to BL33 as arg0](files/0001-feat-imx93-pass-FDT-address-to-BL33-as-arg0.patch)
+
+#### Yocto configuration
+
+The Yocto build system can be configured to produce a FIT image as part of the build artifacts. The
+basic configuration includes the actual FIT enablement, its inclusion in the boot files, the
+selection of algorithms for node hashing and signing and for Linux kernel compression.
+
+> NOTE: for the time being, node signing is disabled (but Yocto supports it).
+
+```
+# Enable FIT image
+KERNEL_CLASSES += "kernel-fit-extra-artifacts"
+
+# Add the FIT image to the boot file for WIC inclusion
+IMAGE_BOOT_FILES:append = " fitImage"
+WKS_FILE_DEPENDS:append = " linux-yocto-fitimage"
+
+# Kernel fitImage Hash Algo
+FIT_HASH_ALG = "sha512"
+
+# Kernel fitImage Signature Algo
+FIT_SIGN_ALG = "rsa4096"
+FIT_SIGN_NUMBITS = "4096"
+
+# Kernel compression
+FIT_KERNEL_COMP_ALG = "lzo"
+FIT_KERNEL_COMP_ALG_EXTENSION = ".lzo"
+DEPENDS:append:pn-linux-mainline = " lzop-native"
+```
+
+In addition to these configurations, which are pretty much portable to any platform, the loading
+addresses for the main components (kernel, devicetree and ramdisk) shall be specified, according
+to [what is expected](#summary) by the specific platform:
+
+```
+UBOOT_ENTRYPOINT:forcevariable = "0x80200000"
+UBOOT_DTB_LOADADDRESS:forcevariable = "0x83000000"
+UBOOT_DTBO_LOADADDRESS:forcevariable = "0x83100000"
+UBOOT_RD_LOADADDRESS:forcevariable = "0x84000000"
+UBOOT_RD_ENTRYPOINT:forcevariable = "0x84000000"
+```
+
+| Variable                  | Address       | FIT image meaning               |
+| ------------------------- | ------------- | ------------------------------- |
+| `UBOOT_ENTRYPOINT`        | `0x80200000`  | Kernel load address             |
+| `UBOOT_DTB_LOADADDRESS`   | `0x83000000`  | Devicetree load address         |
+| `UBOOT_DTBO_LOADADDRESS`  | `0x83100000`  | Devicetree overlay load address |
+| `UBOOT_RD_LOADADDRESS`    | `0x84000000`  | Initramfs load address          |
+| `UBOOT_RD_ENTRYPOINT`     | `0x84000000`  | Initramfs entry point           |
+
+Finally, the TF-A binary shall be included into the FIT image, with a load
+address of `0x204E0000`:
+
+```
+# Kernel fitImage content
+FIT_LOADABLES = "atf"
+DEPENDS:append:pn-linux-yocto-fitimage = " imx-atf"
+
+## FIT loadable: TF-A
+FIT_LOADABLE_FILENAME[atf] = "bl31-imx93.bin"
+FIT_LOADABLE_DESCRIPTION[atf] = "TF-A Firmware"
+FIT_LOADABLE_TYPE[atf] = "tfa-bl31"
+FIT_LOADABLE_OS[atf] = "arm-trusted-firmware"
+FIT_LOADABLE_LOADADDRESS[atf] = "0x204E0000"
+```
+
+#### Let's release the Falcon
+
+After yet another `bitbake` run and a flashing of the resulting
+`core-image-full-cmdline`, the i.MX93 FRDM is... booting!
+
+```
+U-Boot SPL 2026.07-rc1 (May 02 2026 - 08:18:16 +0000)
+PMIC: Over Drive Voltage Mode
+DDR: 3733MTS
+DDR: 3733MTS
+found DRAM 2GB DRAM matched
+M33 prepare ok
+Normal Boot
+Trying to boot from MMC2
+## Loading standalone (any) from FIT Image at 90000000 ...
+   Using 'conf-imx93-11x11-frdm.dtb' configuration
+   Verifying Hash Integrity ... OK
+Could not find subimage node type 'standalone'
+## Loading firmware (any) from FIT Image at 90000000 ...
+   Using 'conf-imx93-11x11-frdm.dtb' configuration
+   Verifying Hash Integrity ... OK
+Could not find subimage node type 'firmware'
+## Loading kernel (any) from FIT Image at 90000000 ...
+   Using 'conf-imx93-11x11-frdm.dtb' configuration
+   Verifying Hash Integrity ... OK
+   Trying 'kernel-1' kernel subimage
+     Description:  Linux kernel
+     Type:         Kernel Image
+     Compression:  lzo compressed
+     Data Start:   0x90000124
+     Data Size:    17464691 Bytes = 16.7 MiB
+     Architecture: AArch64
+     OS:           Linux
+     Load Address: 0x80200000
+     Entry Point:  0x80200000
+     Hash algo:    sha512
+     Hash value:   d1f22abb1fc0445d9e4c3cce6ba1f01a611f9af8d65c54906f1bd5135f25c431bc4dc68d08e0825153d995b52751b11457758f9cf501ea9bd7c187bd2baad354
+   Verifying Hash Integrity ... sha512cyclic function FSL_SDHC took too long: ?dus vs 999171us max
++ OK
+   Loading kernel from 0x90000124 to 0x80200000
+   Uncompressing Kernel Image to 80200000
+## Loading fdt (any) from FIT Image at 90000000 ...
+   Using 'conf-imx93-11x11-frdm.dtb' configuration
+   Verifying Hash Integrity ... OK
+   Trying 'fdt-imx93-11x11-frdm.dtb' fdt subimage
+     Description:  Flattened Device Tree blob
+     Type:         Flat Device Tree
+     Compression:  uncompressed
+     Data Start:   0x910a7fd0
+     Data Size:    49818 Bytes = 48.7 KiB
+     Architecture: AArch64
+     Load Address: 0x83000000
+     Hash algo:    sha512
+     Hash value:   f17e044c0199bde26b01348002e02966951c096d6606c3a999bb1262a033cf2199524fa05bf3d64e59b39ae3d4be51bf929647c9926feea875bdc7186e965278
+   Verifying Hash Integrity ... sha512+ OK
+   Loading fdt from 0x910a7fd0 to 0x83000000
+## Loading ramdisk (any) from FIT Image at 90000000 ...
+   Using 'conf-imx93-11x11-frdm.dtb' configuration
+   Verifying Hash Integrity ... OK
+Could not find subimage node type 'ramdisk'
+## Loading loadables (any) from FIT Image at 90000000 ...
+   Trying 'atf' loadables subimage
+     Description:  TF-A Firmware
+     Type:         TFA BL31 Image
+     Compression:  uncompressed
+     Data Start:   0x910b4360
+     Data Size:    48473 Bytes = 47.3 KiB
+     Hash algo:    sha512
+     Hash value:   83765826e4671f7f7d9b5ee4f2e030284be7518f9a49fe47cb82007679eee3a2e490cb91de8e58240b7b9da92ac4438af313af77861c27d3fb603508a887b184
+   Verifying Hash Integrity ... sha512+ OK
+   Loading loadables from 0x910b4360 to 0x204e0000
+
+NOTICE:  TRDC init done
+NOTICE:  BL31: v2.12.0(release):lf-6.18.2-1.0.0-dirty
+NOTICE:  BL31: Built : 08:17:54, May  2 2026
+
+[    0.000000] Booting Linux on physical CPU 0x0000000000 [0x412fd050]
+[    0.000000] Linux version 7.1.0-rc1 (oe-user@oe-host) (aarch64-poky-linux-gcc (GCC) 15.2.0, GNU ld (GNU Binutils) 2.46) #1 SMP PREEMPT Sun Apr 26 21:19:00 UTC 2026
+[    0.000000] KASLR disabled due to lack of seed
+[    0.000000] Machine model: NXP i.MX93 11X11 FRDM board
+
+<...>
+
+```
+
+Everything seems to be in place, as confirmed by the FIT prints; a `grabserial` run confirms that
+some time has been also removed, with the first kernel print moved from 6.87s to 2.80s:
+
+```
+[2.805810 0.191449] [    0.000000] Booting Linux on physical CPU 0x0000000000 [0x412fd050]
+
+```
+
+There _is_ something unexpected, in the form of this error:
+
+```
+cyclic function FSL_SDHC took too long: ?dus vs 999171us max
+```
+
+which can be traced back to a periodic task run by U-Boot for SDHC maintenance. The periodic logic
+is signalling the user that the task has not been run as scheduled, due to another task blocking it
+(in this case, the hashing of the kernel image). This can be safely ignored for the moment, in the
+hope that it will solve itself when the kernel size will be tuned.
+
+
 ### To be continued...
 
 ## Referenced documents
@@ -1317,6 +1796,8 @@ thoroughly, sooner or later:
 - [i.MX93 Technical Reference Manual](https://www.nxp.com/webapp/Download?colCode=IMX93RM)
 - [i.MX93 FRDM design files](https://www.nxp.com/webapp/Download?colCode=FRDM-iMX93-DESIGNFILES)
 - [Trusted Firmware documentation](https://trustedfirmware-a.readthedocs.io/en/latest/design/firmware-design.html)
+- [U-Boot Falcon Mode](https://docs.u-boot.org/en/v2026.04/develop/falcon.html)
+- [FIT specifications](https://fitspec.osfw.foundation/)
 
 ## License
 
@@ -1356,3 +1837,5 @@ SOFTWARE.
       the unspoken motivations.
 
 [^1]: But this [counts as work time](https://xkcd.com/303), right?
+
+[^2]: In practice, _while_ this was being written.

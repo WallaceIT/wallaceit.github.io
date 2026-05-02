@@ -1,0 +1,549 @@
+From 847c9700e3c5e9893085153516798ac6a4321e4b Mon Sep 17 00:00:00 2001
+From: Francesco Valla <francesco@valla.it>
+Date: Fri, 1 May 2026 18:08:37 +0200
+Subject: [PATCH] i.MX93 FRDM Falcon boot
+
+Signed-off-by: Francesco Valla <francesco@valla.it>
+---
+ arch/arm/dts/imx93-11x11-frdm.dts   |  23 ++++
+ arch/arm/mach-imx/imx9/soc.c        |  36 ++++++
+ board/nxp/imx93_frdm/imx93_frdm.c   |  20 ++-
+ board/nxp/imx93_frdm/spl.c          | 122 ++++++++++++++++++
+ configs/imx93_frdm_falcon_defconfig | 193 ++++++++++++++++++++++++++++
+ 5 files changed, 391 insertions(+), 3 deletions(-)
+ create mode 100644 configs/imx93_frdm_falcon_defconfig
+
+diff --git a/arch/arm/dts/imx93-11x11-frdm.dts b/arch/arm/dts/imx93-11x11-frdm.dts
+index 993567e767d1..d10edef85bf2 100644
+--- a/arch/arm/dts/imx93-11x11-frdm.dts
++++ b/arch/arm/dts/imx93-11x11-frdm.dts
+@@ -157,6 +157,21 @@
+ 	};
+ };
+ 
++&lpi2c1 {
++	clock-frequency = <400000>;
++	pinctrl-0 = <&pinctrl_lpi2c1>;
++	pinctrl-names = "default";
++	status = "okay";
++
++	pcal6408: gpio@20 {
++		compatible = "nxp,pcal6408";
++		reg = <0x20>;
++		#gpio-cells = <2>;
++		gpio-controller;
++		reset-gpios = <&pcal6524 20 GPIO_ACTIVE_LOW>;
++	};
++};
++
+ &lpi2c2 {
+ 	clock-frequency = <400000>;
+ 	pinctrl-0 = <&pinctrl_lpi2c2>;
+@@ -354,6 +369,7 @@
+ &usdhc2 {
+ 	bus-width = <4>;
+ 	cd-gpios = <&gpio3 00 GPIO_ACTIVE_LOW>;
++	no-1-8-v;
+ 	no-mmc;
+ 	no-sdio;
+ 	pinctrl-0 = <&pinctrl_usdhc2>, <&pinctrl_usdhc2_gpio>;
+@@ -454,6 +470,13 @@
+ 		>;
+ 	};
+ 
++	pinctrl_lpi2c1: lpi2c1grp {
++		fsl,pins = <
++			MX93_PAD_I2C1_SCL__LPI2C1_SCL			0x40000b9e
++			MX93_PAD_I2C1_SDA__LPI2C1_SDA			0x40000b9e
++		>;
++	};
++
+ 	pinctrl_lpi2c2: lpi2c2grp {
+ 		fsl,pins = <
+ 			MX93_PAD_I2C2_SCL__LPI2C2_SCL			0x40000b9e
+diff --git a/arch/arm/mach-imx/imx9/soc.c b/arch/arm/mach-imx/imx9/soc.c
+index 44b3e0f53101..6acb1ee7fa90 100644
+--- a/arch/arm/mach-imx/imx9/soc.c
++++ b/arch/arm/mach-imx/imx9/soc.c
+@@ -7,8 +7,10 @@
+ 
+ #include <config.h>
+ #include <cpu_func.h>
++#include <image.h>
+ #include <init.h>
+ #include <log.h>
++#include <spl.h>
+ #include <asm/arch/imx-regs.h>
+ #include <asm/global_data.h>
+ #include <asm/io.h>
+@@ -1047,3 +1049,37 @@ enum imx9_soc_voltage_mode soc_target_voltage_mode(void)
+ 
+ 	return voltage;
+ }
++
++#if CONFIG_IS_ENABLED(OS_BOOT) && CONFIG_IS_ENABLED(FIT_IMAGE_POST_PROCESS)
++/* If booting from a FIT image, try to extract the TF-A load address and use
++ * it as entrypoint instead of the kernel one. */
++
++static ulong tfa_load_address = 0UL;
++
++void board_fit_image_post_process(const void *fit, int node, void **p_image,
++				  size_t *p_size)
++{
++	const char *value;
++	u32 addr;
++	int len;
++
++	value = fdt_getprop(fit, node, "os", &len);
++	if (!value)
++		return;
++
++	switch (genimg_get_os_id(value)) {
++	case IH_OS_ARM_TRUSTED_FIRMWARE:
++		addr = fdt_getprop_u32_default_node(fit, node, 0, "load", 0);
++		if (addr != 0) {
++			tfa_load_address = (ulong)addr;
++			debug("%s: TF-A load address is %08lX\n", __func__,
++			      tfa_load_address);
++		} else {
++			printf("%s: failed to get TF-A load address\n", __func__);
++		}
++		return;
++	default:
++		break;
++	}
++}
++#endif
+diff --git a/board/nxp/imx93_frdm/imx93_frdm.c b/board/nxp/imx93_frdm/imx93_frdm.c
+index e187de74a724..0b52e7487ac7 100644
+--- a/board/nxp/imx93_frdm/imx93_frdm.c
++++ b/board/nxp/imx93_frdm/imx93_frdm.c
+@@ -38,7 +38,7 @@ struct efi_capsule_update_info update_info = {
+ #define TCPC_ALERT_MASK 0x12
+ #define TCPC_FAULT_STATUS_MASK 0x15
+ 
+-#define TCPC1_I2C_BUS 2
++#define TCPC1_I2C_BUS "i2c@42530000"
+ #define TCPC1_I2C_ADDR 0x50
+ 
+ /*
+@@ -55,9 +55,9 @@ static int clear_pd_alert(void)
+ 	u8 buffer_0[2] = {0, 0};
+ 	u8 buffer_1[2] = {0xff, 0xff};
+ 
+-	ret = uclass_get_device_by_seq(UCLASS_I2C, TCPC1_I2C_BUS, &bus);
++	ret = uclass_get_device_by_name(UCLASS_I2C, TCPC1_I2C_BUS, &bus);
+ 	if (ret) {
+-		printf("Failed to get I2C bus %d\n", TCPC1_I2C_BUS);
++		printf("Failed to get I2C bus %s\n", TCPC1_I2C_BUS);
+ 		return ret;
+ 	}
+ 
+@@ -90,6 +90,11 @@ static int clear_pd_alert(void)
+ 	return 0;
+ }
+ 
++int board_early_init_f(void)
++{
++	return 0;
++}
++
+ int board_init(void)
+ {
+ 	return 0;
+@@ -97,6 +102,7 @@ int board_init(void)
+ 
+ int board_late_init(void)
+ {
++#if !IS_ENABLED(CONFIG_XPL_BUILD)
+ 	if (IS_ENABLED(CONFIG_ENV_IS_IN_MMC) || IS_ENABLED(CONFIG_ENV_IS_IN_NOWHERE))
+ 		board_late_mmc_env_init();
+ 
+@@ -109,8 +115,16 @@ int board_late_init(void)
+ 		printf("USB boot detected. Will enter fasboot mode\n");
+ 		env_set_ulong("dofastboot", 1);
+ 	}
++#endif
+ 
+ 	clear_pd_alert();
+ 
+ 	return 0;
+ }
++
++#if IS_ENABLED(CONFIG_OF_BOARD_SETUP) && !IS_ENABLED(CONFIG_XPL_BUILD)
++int ft_board_setup(void *blob, struct bd_info *bd)
++{
++	return 0;
++}
++#endif
+\ No newline at end of file
+diff --git a/board/nxp/imx93_frdm/spl.c b/board/nxp/imx93_frdm/spl.c
+index 068091ba0e96..ab42e81bf606 100644
+--- a/board/nxp/imx93_frdm/spl.c
++++ b/board/nxp/imx93_frdm/spl.c
+@@ -5,7 +5,9 @@
+ 
+ #include "lpddr4_timing.h"
+ 
++#include <fdt_support.h>
+ #include <init.h>
++#include <serial.h>
+ #include <spl.h>
+ #include <asm/arch/clock.h>
+ #include <asm/arch/ddr.h>
+@@ -14,8 +16,10 @@
+ #include <asm/arch/trdc.h>
+ #include <asm/mach-imx/boot_mode.h>
+ #include <asm/mach-imx/ele_api.h>
++#include <asm/cache.h>
+ #include <asm/global_data.h>
+ #include <asm/sections.h>
++#include <asm/system.h>
+ #include <dm/device.h>
+ #include <dm/device-internal.h>
+ #include <dm/uclass.h>
+@@ -38,10 +42,120 @@ static struct _drams {
+ 	{0x18, &dram_timing_2GB, "2GB DRAM" },
+ };
+ 
++#if CONFIG_IS_ENABLED(OS_BOOT)
++int spl_start_uboot(void)
++{
++	int start_uboot = 0;
++
++	if (!serial_tstc())
++		return 0;
++
++	/* break into full u-boot on 'c' */
++	return serial_tstc() && serial_getc() == 'c';
++}
++
++int spl_board_boot_device(enum boot_device boot_dev_spl)
++{
++	switch (boot_dev_spl) {
++	case SD1_BOOT:
++	case MMC1_BOOT:
++		return BOOT_DEVICE_MMC1;
++	case SD2_BOOT:
++	case MMC2_BOOT:
++		return BOOT_DEVICE_MMC2;
++	default:
++		return BOOT_DEVICE_BOOTROM;
++	}
++}
++
++void board_boot_order(u32 *spl_boot_list)
++{
++	spl_boot_list[0] = spl_boot_device();
++	spl_boot_list[1] = BOOT_DEVICE_BOOTROM;
++}
++
++#if IS_ENABLED(CONFIG_OF_BOARD_SETUP) && CONFIG_IS_ENABLED(OF_LIBFDT)
++static char bootargs[256] = "console=ttyLP0,115200";
++
++const char *board_fdt_chosen_bootargs(const struct fdt_property *fdt_ba)
++{
++	const char *rootarg;
++
++	switch (spl_boot_device()) {
++	case BOOT_DEVICE_MMC1:
++		rootarg = " root=/dev/mmcblk0p2 rootwait";
++		break;
++	case BOOT_DEVICE_MMC2:
++	case BOOT_DEVICE_MMC2_2:
++	default:
++		rootarg = " root=/dev/mmcblk1p2 rootwait";
++		break;
++	}
++
++	return strncat(bootargs, rootarg, sizeof(bootargs) - strlen(bootargs) - 1);
++}
++
++int ft_board_setup(void *blob, struct bd_info *bd)
++{
++	return fdt_chosen(blob);
++}
++#endif
++
++static void spl_enable_caches(void)
++{
++#if !(defined(CONFIG_SYS_ICACHE_OFF) && defined(CONFIG_SYS_DCACHE_OFF))
++	gd->ram_top = CFG_SYS_SDRAM_BASE;
++
++	dram_init();
++	dram_init_banksize();
++
++	/* reserve TLB table */
++	gd->arch.tlb_size = PGTABLE_SIZE;
++
++	gd->ram_top += get_effective_memsize();
++	gd->relocaddr = gd->ram_top;
++
++	gd->arch.tlb_addr = gd->relocaddr - gd->arch.tlb_size;
++	gd->arch.tlb_addr &= ~(0x10000 - 1);
++	debug("TLB table from %08lx to %08lx\n", gd->arch.tlb_addr,
++	      gd->arch.tlb_addr + gd->arch.tlb_size);
++	gd->relocaddr = gd->arch.tlb_addr;
++
++	enable_caches();
++#endif
++}
++
++void spl_board_prepare_for_boot(void)
++{
++	/* Ensure caches are always disabled after SPL */
++	if (IS_ENABLED(CONFIG_CMO_BY_VA_ONLY)) {
++		/*
++		 * Disable D-cache.
++		 */
++		dcache_disable();
++	} else {
++		/*
++		 * Turn off I-cache and invalidate it
++		 */
++		icache_disable();
++		invalidate_icache_all();
++
++		/*
++		 * turn off D-cache
++		 * dcache_disable() in turn flushes the d-cache and disables
++		 * MMU
++		 */
++		dcache_disable();
++		invalidate_dcache_all();
++	}
++}
++
++#else // !CONFIG_SPL_OS_BOOT
+ int spl_board_boot_device(enum boot_device boot_dev_spl)
+ {
+ 	return BOOT_DEVICE_BOOTROM;
+ }
++#endif
+ 
+ void spl_board_init(void)
+ {
+@@ -51,6 +165,12 @@ void spl_board_init(void)
+ 	if (ret)
+ 		printf("Fail to start RNG: %d\n", ret);
+ 
++#if CONFIG_IS_ENABLED(OS_BOOT)
++	spl_enable_caches();
++
++	board_late_init();
++#endif
++
+ 	puts("Normal Boot\n");
+ }
+ 
+@@ -156,6 +276,8 @@ void board_init_f(ulong dummy)
+ 
+ 	arch_cpu_init();
+ 
++	board_early_init_f();
++
+ 	spl_early_init();
+ 
+ 	preloader_console_init();
+diff --git a/configs/imx93_frdm_falcon_defconfig b/configs/imx93_frdm_falcon_defconfig
+new file mode 100644
+index 000000000000..c66bcc60633e
+--- /dev/null
++++ b/configs/imx93_frdm_falcon_defconfig
+@@ -0,0 +1,193 @@
++CONFIG_ARM=y
++CONFIG_ARCH_IMX9=y
++CONFIG_TEXT_BASE=0x80200000
++CONFIG_SYS_MALLOC_LEN=0x2000000
++CONFIG_SYS_MALLOC_F_LEN=0x18000
++CONFIG_SPL_LIBCOMMON_SUPPORT=y
++CONFIG_SPL_LIBGENERIC_SUPPORT=y
++CONFIG_NR_DRAM_BANKS=2
++CONFIG_ENV_SIZE=0x4000
++CONFIG_ENV_OFFSET=0x700000
++CONFIG_IMX_CONFIG="arch/arm/mach-imx/imx9/imximage.cfg"
++CONFIG_DM_GPIO=y
++CONFIG_DEFAULT_DEVICE_TREE="imx93-11x11-frdm"
++CONFIG_TARGET_IMX93_FRDM=y
++CONFIG_SYS_MONITOR_LEN=524288
++CONFIG_SPL_SERIAL=y
++CONFIG_SPL_DRIVERS_MISC=y
++CONFIG_SPL_STACK=0x20519dd0
++CONFIG_SPL_TEXT_BASE=0x2049A000
++CONFIG_SPL_HAS_BSS_LINKER_SECTION=y
++CONFIG_SPL_BSS_START_ADDR=0x2051a000
++CONFIG_SPL_BSS_MAX_SIZE=0x2000
++CONFIG_SYS_LOAD_ADDR=0x80400000
++CONFIG_SPL=y
++CONFIG_SPL_IMX_ROMAPI_LOADADDR=0x88000000
++CONFIG_SYS_MEMTEST_START=0x80000000
++CONFIG_SYS_MEMTEST_END=0x90000000
++CONFIG_REMAKE_ELF=y
++CONFIG_EFI_VAR_BUF_SIZE=139264
++CONFIG_EFI_RUNTIME_UPDATE_CAPSULE=y
++CONFIG_EFI_CAPSULE_ON_DISK=y
++CONFIG_EFI_CAPSULE_FIRMWARE_RAW=y
++# CONFIG_ANDROID_BOOT_IMAGE is not set
++CONFIG_BOOTCOMMAND="bootflow scan -lb; run bsp_bootcmd"
++CONFIG_DEFAULT_FDT_FILE="imx93-11x11-frdm.dtb"
++CONFIG_SYS_CBSIZE=2048
++CONFIG_SYS_PBSIZE=2074
++CONFIG_BOARD_EARLY_INIT_F=y
++CONFIG_BOARD_LATE_INIT=y
++CONFIG_SPL_MAX_SIZE=0x26000
++CONFIG_SPL_BOARD_INIT=y
++CONFIG_SPL_BOOTROM_SUPPORT=y
++CONFIG_SPL_LOAD_IMX_CONTAINER=y
++CONFIG_IMX_CONTAINER_CFG="arch/arm/mach-imx/imx9/container.cfg"
++# CONFIG_SPL_SHARES_INIT_SP_ADDR is not set
++CONFIG_SPL_HAVE_INIT_STACK=y
++CONFIG_SPL_SYS_MALLOC=y
++CONFIG_SPL_HAS_CUSTOM_MALLOC_START=y
++CONFIG_SPL_CUSTOM_SYS_MALLOC_ADDR=0x83200000
++CONFIG_SPL_SYS_MALLOC_SIZE=0x80000
++CONFIG_SPL_SYS_MMCSD_RAW_MODE=y
++CONFIG_SYS_MMCSD_RAW_MODE_U_BOOT_SECTOR=0x1040
++CONFIG_SPL_I2C=y
++CONFIG_SPL_POWER=y
++CONFIG_SPL_WATCHDOG=y
++CONFIG_SYS_PROMPT="u-boot=> "
++CONFIG_CMD_CPU=y
++CONFIG_CMD_ERASEENV=y
++CONFIG_CMD_NVEDIT_EFI=y
++# CONFIG_CMD_CRC32 is not set
++CONFIG_CMD_MEMTEST=y
++# CONFIG_CMD_BIND is not set
++CONFIG_CMD_CLK=y
++CONFIG_CMD_DFU=y
++CONFIG_CMD_FUSE=y
++CONFIG_CMD_GPIO=y
++CONFIG_CMD_GPT=y
++CONFIG_CMD_I2C=y
++CONFIG_CMD_MMC=y
++CONFIG_CMD_POWEROFF=y
++CONFIG_CMD_SNTP=y
++CONFIG_CMD_CACHE=y
++CONFIG_CMD_EFIDEBUG=y
++CONFIG_CMD_TIME=y
++CONFIG_CMD_GETTIME=y
++CONFIG_CMD_TIMER=y
++CONFIG_CMD_REGULATOR=y
++CONFIG_CMD_HASH=y
++CONFIG_CMD_EXT4_WRITE=y
++CONFIG_CMD_SPAWN=y
++CONFIG_OF_CONTROL=y
++CONFIG_SPL_OF_CONTROL=y
++CONFIG_ENV_OVERWRITE=y
++CONFIG_ENV_IS_NOWHERE=y
++CONFIG_ENV_IS_IN_MMC=y
++CONFIG_ENV_RELOC_GD_ENV_ADDR=y
++CONFIG_ENV_VARS_UBOOT_RUNTIME_CONFIG=y
++CONFIG_SPL_DM=y
++CONFIG_ADC=y
++CONFIG_ADC_IMX93=y
++CONFIG_SPL_CLK_IMX93=y
++CONFIG_CLK_IMX93=y
++CONFIG_DFU_MMC=y
++CONFIG_USB_FUNCTION_FASTBOOT=y
++CONFIG_FASTBOOT_BUF_ADDR=0x82800000
++CONFIG_FASTBOOT_FLASH=y
++CONFIG_FASTBOOT_UUU_SUPPORT=y
++CONFIG_FASTBOOT_FLASH_MMC_DEV=0
++CONFIG_IMX_RGPIO2P=y
++CONFIG_DM_PCA953X=y
++CONFIG_DM_I2C=y
++CONFIG_SPL_DM_I2C=y
++CONFIG_SYS_I2C_IMX_LPI2C=y
++CONFIG_SUPPORT_EMMC_RPMB=y
++CONFIG_SUPPORT_EMMC_BOOT=y
++CONFIG_MMC_IO_VOLTAGE=y
++CONFIG_MMC_UHS_SUPPORT=y
++CONFIG_MMC_HS400_ES_SUPPORT=y
++CONFIG_MMC_HS400_SUPPORT=y
++CONFIG_FSL_USDHC=y
++CONFIG_PINCTRL=y
++CONFIG_SPL_PINCTRL=y
++CONFIG_PINCTRL_IMX93=y
++CONFIG_DM_PMIC=y
++CONFIG_SPL_DM_PMIC_PCA9450=y
++CONFIG_DM_REGULATOR=y
++CONFIG_DM_REGULATOR_FIXED=y
++CONFIG_DM_REGULATOR_GPIO=y
++CONFIG_DM_SERIAL=y
++CONFIG_FSL_LPUART=y
++CONFIG_SYSRESET=y
++CONFIG_SYSRESET_CMD_POWEROFF=y
++CONFIG_SYSRESET_PSCI=y
++CONFIG_DM_THERMAL=y
++CONFIG_USB=y
++CONFIG_USB_EHCI_HCD=y
++CONFIG_USB_GADGET=y
++CONFIG_USB_GADGET_MANUFACTURER="FSL"
++CONFIG_USB_GADGET_VENDOR_NUM=0x1fc9
++CONFIG_USB_GADGET_PRODUCT_NUM=0x0152
++CONFIG_CI_UDC=y
++CONFIG_ULP_WATCHDOG=y
++CONFIG_WDT=y
++CONFIG_SHA384=y
++CONFIG_LZO=y
++CONFIG_BZIP2=y
++
++# Bump maximum size for SPL to the available space
++CONFIG_SPL_MAX_SIZE=0x46000
++
++# Enable Falcon mode
++CONFIG_SPL_OS_BOOT=y
++CONFIG_SPL_OS_BOOT_SECURE=y
++# CONFIG_SPL_OS_BOOT_ARGS is not set
++
++# Support loading of FIT image from FAT-partitioned MMC/SD device
++CONFIG_SPL_MMC=y
++# CONFIG_SPL_MMC_TINY is not set
++# CONFIG_SPL_MMC_WRITE is not set
++CONFIG_MMC_BROKEN_CD=y
++CONFIG_SPL_FS_FAT=y
++CONFIG_SPL_FS_FAT_DMA_ALIGN=y
++CONFIG_SPL_FS_LOAD_PAYLOAD_NAME="u-boot-atf-container.img"
++CONFIG_SPL_FS_LOAD_KERNEL_NAME="fitImage"
++# CONFIG_SPL_FALCON_BOOT_MMCSD is not set
++CONFIG_SYS_MMCSD_FS_BOOT=y
++CONFIG_SYS_MMCSD_FS_BOOT_PARTITION=1
++
++# FIT image load address
++CONFIG_SYS_LOAD_ADDR=0x90000000
++
++# Devicetree load address
++CONFIG_SPL_PAYLOAD_ARGS_ADDR=0x83000000
++
++# SPL FIT "full" support
++CONFIG_FIT=y
++CONFIG_FIT_FULL_CHECK=y
++CONFIG_SPL_FIT=y
++CONFIG_SPL_FIT_IMAGE_POST_PROCESS=y
++CONFIG_SPL_FIT_PRINT=y
++CONFIG_SPL_FIT_SIGNATURE=y
++# CONFIG_SPL_FIT_IMAGE_TINY is not set
++CONFIG_SPL_LOAD_FIT=y
++CONFIG_SPL_LOAD_FIT_FULL=y
++
++# FIT integrity and authenticity
++CONFIG_SHA512=y
++CONFIG_SPL_SHA512=y
++CONFIG_SPL_RSA=y
++CONFIG_SPL_RSA_VERIFY=y
++
++# Devicetree post processing
++CONFIG_SPL_OF_LIBFDT=y
++CONFIG_OF_LIBFDT_OVERLAY=y
++
++# Board-level support for Falcon boot
++CONFIG_OF_BOARD_SETUP=y
++
++# Support for TF-A
++CONFIG_SPL_ATF=y
++
++# Support for LZO-compressed kernel
++CONFIG_SPL_LZO=y
+-- 
+2.54.0
+

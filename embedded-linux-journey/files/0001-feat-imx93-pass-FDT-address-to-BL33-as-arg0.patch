@@ -1,0 +1,43 @@
+From 290a73dca6339e2ade3605aff280a4cde6aa69a4 Mon Sep 17 00:00:00 2001
+From: Francesco Valla <francesco@valla.it>
+Date: Sat, 2 May 2026 11:01:44 +0200
+Subject: [PATCH] feat(imx93): pass FDT address to BL33 as arg0
+
+The FDT address in arg0 is required when booting directly the Linux
+kernel.
+
+Signed-off-by: Francesco Valla <francesco@valla.it>
+---
+ plat/imx/imx93/imx93_bl31_setup.c     | 3 +++
+ plat/imx/imx93/include/platform_def.h | 1 +
+ 2 files changed, 4 insertions(+)
+
+diff --git a/plat/imx/imx93/imx93_bl31_setup.c b/plat/imx/imx93/imx93_bl31_setup.c
+index c134512f24f2..4e1b7513ff88 100644
+--- a/plat/imx/imx93/imx93_bl31_setup.c
++++ b/plat/imx/imx93/imx93_bl31_setup.c
+@@ -84,6 +84,9 @@ void bl31_early_platform_setup2(u_register_t arg0, u_register_t arg1,
+ 	bl33_image_ep_info.spsr = get_spsr_for_bl33_entry();
+ 	SET_SECURITY_STATE(bl33_image_ep_info.h.attr, NON_SECURE);
+ 
++	/* Pass FTD load adress to bl33 */
++	bl33_image_ep_info.args.arg0 = PLAT_NS_FDT_OFFSET;
++
+ #if defined(SPD_opteed) || defined(SPD_trusty)
+ 	/* Populate entry point information for BL32 */
+ 	SET_PARAM_HEAD(&bl32_image_ep_info, PARAM_EP, VERSION_1, 0);
+diff --git a/plat/imx/imx93/include/platform_def.h b/plat/imx/imx93/include/platform_def.h
+index c8d650164729..33cd4d1e1b25 100644
+--- a/plat/imx/imx93/include/platform_def.h
++++ b/plat/imx/imx93/include/platform_def.h
+@@ -41,6 +41,7 @@
+ /* non-secure uboot base */
+ /* TODO */
+ #define PLAT_NS_IMAGE_OFFSET		U(0x80200000)
++#define PLAT_NS_FDT_OFFSET		U(0x83000000)
+ #define BL32_FDT_OVERLAY_ADDR           (PLAT_NS_IMAGE_OFFSET + 0x3000000)
+ 
+ /* GICv4 base address */
+-- 
+2.54.0
+
