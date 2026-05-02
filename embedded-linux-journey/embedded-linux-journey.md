@@ -1425,6 +1425,7 @@ Additional changes has to be performed at arch- and board-level:
 
 * `arch/arm/mach-imx/imx9/soc.c`: a combination of arch fixup and FIT post-process is used to
   select the TF-A as the image to start after the SPL:
+
 ```c
 /* If booting from a FIT image, try to extract the TF-A load address and use
  * it as entrypoint instead of the kernel one. */
@@ -1467,8 +1468,10 @@ void spl_perform_arch_fixups(struct spl_image_info *spl_image)
 	}
 }
 ```
+
 * `board/nxp/imx93_frdm/spl.c`: the boot device has to be selected correctly (default implementation
    uses the ROM-loaded binaries):
+
 ```c
 int spl_board_boot_device(enum boot_device boot_dev_spl)
 {
@@ -1490,8 +1493,10 @@ void board_boot_order(u32 *spl_boot_list)
 	spl_boot_list[1] = BOOT_DEVICE_BOOTROM;
 }
 ```
+
 * `board/nxp/imx93_frdm/spl.c`: the correct root device has to be injected into the Linux kernel
   devicetree (this is typically done by U-Boot proper reading the `bootargs` environment variable):
+
 ```c
 #if IS_ENABLED(CONFIG_OF_BOARD_SETUP) && CONFIG_IS_ENABLED(OF_LIBFDT)
 const char *board_fdt_chosen_bootargs(const struct fdt_property *fdt_ba)
@@ -1520,6 +1525,7 @@ int ft_board_setup(void *blob, struct bd_info *bd)
 }
 #endif
 ```
+
 * caches have to be enabled, or the access to DRAM will take ages;
 * misc fixups have to be applied for the system to work correctly.
 
