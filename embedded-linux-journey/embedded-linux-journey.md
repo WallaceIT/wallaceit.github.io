@@ -2,7 +2,7 @@
 
 > **WARNING**: this is a Work In Progress! The content is subject to change with no notice.
 
-**Last update**: 2026-05-02
+**Last update**: 2026-05-03
 
 ## Introduction
 
@@ -1796,6 +1796,257 @@ is signalling the user that the task has not been run as scheduled, due to anoth
 (in this case, the hashing of the kernel image). This can be safely ignored for the moment, in the
 hope that it will solve itself when the kernel size will be tuned.
 
+### Day 9: TEE time
+
+**TL;DR**: OP-TEE components (OS, driver and supplicant) are introduced in the mix, with a couple
+of additional patches and a pull request.
+
+Time to go back to the OP-TEE, which was left behind [a couple of days ago](#a-tale-of-two-u-boot-flavours)
+because not supported by the upstream U-Boot.
+
+#### Introduction to OP-TEE
+
+OP-TEE is a Trusted Execution Environment designed to run as a secure companion to the Linux kernel;
+on ARM processor it runs using the TrustZone technology. It can be used for a number of
+security-related functionalities, including storage of keys and other cryptographic material.
+
+OP-TEE is composed by three main components:
+  - the code running in the secure partition, called OP-TEE OS;
+  - the `optee` Linux kernel driver, providing interfaces with the OS;
+  - the OP-TEE supplicant, a userspace application providing additional service to the OS
+    (e.g.: access to non-volatile storage).
+
+More information can be found on the [official documentation](#referenced-documents).
+
+#### The `u-boot-imx` way
+
+While patching the TF-A for direct Linux kernel booting, it became clear(_-ish_) that when the
+OP-TEE support is enabled (in the case of TF-A, with the `SPD=opteed` configure option) the address
+and size of BL32 (i.e., OP-TEE) is passed back to BL33 (i.e., either U-Boot or the Linux kernel)
+for "further processing". From the TF-A code (at `plat/imx/imx93/imx93_bl31_setup.c`):
+
+```c
+#if defined(SPD_opteed) || defined(SPD_trusty)
+	/* Populate entry point information for BL32 */
+	SET_PARAM_HEAD(&bl32_image_ep_info, PARAM_EP, VERSION_1, 0);
+	SET_SECURITY_STATE(bl32_image_ep_info.h.attr, SECURE);
+	bl32_image_ep_info.pc = BL32_BASE;
+	bl32_image_ep_info.spsr = 0;
+
+	/* Pass TEE base and size to bl33 */
+	bl33_image_ep_info.args.arg1 = BL32_BASE;
+	bl33_image_ep_info.args.arg2 = BL32_SIZE;
+
+#ifdef SPD_trusty
+	bl32_image_ep_info.args.arg0 = BL32_SIZE;
+	bl32_image_ep_info.args.arg1 = BL32_BASE;
+#else
+	/* Make sure memory is clean */
+	mmio_write_32(BL32_FDT_OVERLAY_ADDR, 0);
+	bl33_image_ep_info.args.arg3 = BL32_FDT_OVERLAY_ADDR;
+	bl32_image_ep_info.args.arg3 = BL32_FDT_OVERLAY_ADDR;
+#endif
+#endif
+```
+
+> NOTE: the `trusty` mentioned here should be the OP-TEE equivalent for Android, and is _definitely_
+  out of scope for this journey.
+
+Some investigation inside the `u-boot-imx` source code leads to the actual usage of the values: they
+are saved during the first execution steps of U-Boot proper and then used later to both exclude the
+OP-TEE memory from the cached regions _and_ patch the Linux kernel devicetree for OP-TEE support.
+
+From the `uboot-imx` source code (at `arch/arm/mach-imx/imx9/soc.c`, inside the
+`dram_init_banksize()` function) - but the same logic can be found also in upstream `u-boot`:
+
+```c
+	gd->bd->bi_dram[bank].start = PHYS_SDRAM;
+	if (!IS_ENABLED(CONFIG_XPL_BUILD) && rom_pointer[1]) {
+		phys_addr_t optee_start = (phys_addr_t)rom_pointer[0];
+		phys_size_t optee_size = (size_t)rom_pointer[1];
+
+		gd->bd->bi_dram[bank].size = optee_start - gd->bd->bi_dram[bank].start;
+		if ((optee_start + optee_size) < (PHYS_SDRAM + sdram_b1_size)) {
+			if (++bank >= CONFIG_NR_DRAM_BANKS) {
+				puts("CONFIG_NR_DRAM_BANKS is not enough\n");
+				return -1;
+			}
+
+			gd->bd->bi_dram[bank].start = optee_start + optee_size;
+			gd->bd->bi_dram[bank].size = PHYS_SDRAM +
+				sdram_b1_size - gd->bd->bi_dram[bank].start;
+		}
+	} else {
+		gd->bd->bi_dram[bank].size = sdram_b1_size;
+	}
+```
+
+#### TEE for the Falcon
+
+It is quite clear that this logic cannot be applied to the Falcon boot mode, as there is no U-Boot
+proper that can read these value and patch the kernel devicetree.
+
+While it might _theoretically_ be possible to patch the Linux kernel to read `arg1` and `arg2` at
+boot and derive from them the OP-TEE configuration, this would collide with the current
+[ARM64 boot specifications](#referenced-documents), which require both `arg1` (a.k.a. `x1`) and
+`arg2` (a.k.a. `x2`) to be set to zero. Such a modification would be impossible to submit upstream
+and potentially collide with future modifications of this boot logic.
+
+The simplest solution to patch the kernel devicetree in this case appears to be the usage of...
+the OP-TEE itself!. Turns out that if the support for devicetree is enabled (`CFG_DT` set to `y`)
+while the one for the devicetree overlay is disabled (both `CFG_EXTERNAL_DTB_OVERLAY` and
+`CFG_GENERATE_DTB_OVERLAY` set to `n`), the OP-TEE logic tries to add its nodes to a devicetree
+found at the address passed as `arg3` (a.k.a. `x3`). This is not the default configuration for the
+i.MX93, but a simple patch for `optee-os` can solve that:
+
+1. [core: imx: disable external DTB overlay for i.MX93](files/0001-core-imx-disable-external-DTB-overlay-for-i.MX93.patch)
+
+According to the explanation above, a complementary patch is required for the TF-A to pass the
+devicetree address as `arg3` to BL32, and stop passing `arg2` and `arg3` to BL33:
+
+1. [feat(imx93): pass FDT address to BL32 as arg3](files/0001-feat-imx93-pass-FDT-address-to-BL32-as-arg3.patch)
+
+The only missing pieve now should be the OP-TEE firmware itself, that shall be added to the FIT image through
+the `local.conf` (modifying also the TF-A firmware name, since the `imx-atf` recipe creates a different binary for the
+OP-TEE-enabled version):
+
+```
+# Kernel fitImage content
+FIT_LOADABLES = "atf ${@bb.utils.filter('MACHINE_FEATURES', 'optee', d)}"
+DEPENDS:append:pn-linux-yocto-fitimage = " imx-atf ${@bb.utils.contains('MACHINE_FEATURES', 'optee', 'optee-os', '', d)}"
+
+## FIT loadable: TF-A
+FIT_LOADABLE_FILENAME[atf] = "bl31-imx93.bin${@bb.utils.contains('MACHINE_FEATURES', 'optee', '-optee', '', d)}"
+FIT_LOADABLE_DESCRIPTION[atf] = "TF-A Firmware"
+FIT_LOADABLE_TYPE[atf] = "tfa-bl31"
+FIT_LOADABLE_OS[atf] = "arm-trusted-firmware"
+FIT_LOADABLE_LOADADDRESS[atf] = "0x204E0000"
+
+## FIT loadable: OP-TEE
+FIT_LOADABLE_FILENAME[optee] = "optee/tee-raw.bin"
+FIT_LOADABLE_DESCRIPTION[optee] = "OP-TEE"
+FIT_LOADABLE_TYPE[optee] = "tee"
+FIT_LOADABLE_OS[optee] = "tee"
+FIT_LOADABLE_LOADADDRESS[optee] = "0x96000000"
+
+MACHINE_FEATURES:append = " optee"
+```
+
+A build and flashing cycle leads to... another boot hang, just after the TF-A startup:
+
+```
+NOTICE:  TRDC init done
+NOTICE:  BL31: v2.12.0(release):lf-6.18.2-1.0.0-dirty
+NOTICE:  BL31: Built : 08:17:54, May  2 2026
+```
+
+The reason here is not really obvious, but some digging through logs and source code, as well as
+some reading of documentation and mailing lists, permit to trace the issue to a warning
+[seen on day 7](#day-7-mainline-u-boot):
+
+```
+| WARNING '/home/francesco/YOCTO/build.imx9/tmp/work/imx93_11x11_frdm-poky-linux/u-boot/2026.01/sources/u-boot-2026.01/mx93a1-ahab-container.img' not found, resulting binary may be not-functional
+```
+
+The `mx93a1-ahab-container.img` is the place where the ELE firmware can be found; while not
+mandatory for boot, this firmware is expected to be there by the OP-TEE firmware. A patch to
+the aforementioned `imx-boot-container.bbclass` is probably the best way to proceed, and this time
+it is worth a [pull request](https://github.com/Freescale/meta-freescale/pull/2519).
+
+With this applied, a fresh build is booting:
+
+```
+<...>
+
+## Loading loadables (any) from FIT Image at 90000000 ...
+   Trying 'optee' loadables subimage
+     Description:  OP-TEE
+     Type:         Trusted Execution Environment Image
+     Compression:  uncompressed
+     Data Start:   0x910c11c8
+     Data Size:    602016 Bytes = 587.9 KiB
+     Hash algo:    sha512
+     Hash value:   d13bf7050c4ab5500589497ed3c94fe776032d8fb99b61a1c0fc5082b18b0f3e4cde902d7ce5b0835684bf7e436ac9f9c966efb751c49acf8aed695f4f7b463c
+   Verifying Hash Integrity ... sha512+ OK
+   Loading loadables from 0x910c11c8 to 0x96000000
+NOTICE:  TRDC init done
+NOTICE:  BL31: v2.12.0(release):lf-6.18.2-1.0.0-dirty
+NOTICE:  BL31: Built : 08:17:54, May  2 2026
+[    0.000000] Booting Linux on physical CPU 0x0000000000 [0x412fd050]
+[    0.000000] Linux version 7.1.0-rc1 (oe-user@oe-host) (aarch64-poky-linux-gcc (GCC) 15.2.0, GNU ld (GNU Binutils) 2.46) #1 SMP PREEMPT Sun Apr 26 21:19:00 UTC 2026
+[    0.000000] KASLR disabled due to lack of seed
+[    0.000000] Machine model: NXP i.MX93 11X11 FRDM board
+
+<...>
+```
+
+and the Linux kernel is correctly initializing the OP-TEE reserved memory and the `optee` driver:
+
+```
+root@imx93-11x11-frdm:~# dmesg|grep tee
+[    0.000000] OF: reserved mem: 0x0000000096000000..0x0000000097dfffff (30720 KiB) nomap non-reusable optee_core@96000000
+[    0.000000] OF: reserved mem: 0x0000000097e00000..0x0000000097ffffff (2048 KiB) nomap non-reusable optee_shm@97e00000
+[    1.572212] optee: probing for conduit method.
+[    1.576717] optee: revision 4.8 (3e15ce2ca5b80ad2)
+[    1.577065] optee: dynamic shared memory is enabled
+[    1.587120] optee: initialized driver
+```
+
+#### The supplicant
+
+Given that the OP-TEE OS is booting and communicating with the kernel driver, is now time to install
+the userspace supplicant, part of the `optee-client` package, and run some tests on the target.
+
+On the `local.conf`:
+
+```
+# OP-TEE userspace components
+DISTRO_FEATURES:append = " optee"
+IMAGE_INSTALL:append = "${@bb.utils.contains('COMBINED_FEATURES', 'optee', ' optee-client optee-test', '', d)}"
+```
+
+Once the new image is flashed, it can be verified that the supplicant is running on the target:
+
+```
+root@imx93-11x11-frdm:~# systemctl status tee-supplicant@teepriv0.service
+* tee-supplicant@teepriv0.service - TEE Supplicant on teepriv0
+     Loaded: loaded (/usr/lib/systemd/system/tee-supplicant@.service; static)
+     Active: active (running) since Fri 2026-03-13 15:35:17 UTC; 6min ago
+ Invocation: cfd24d57a31441938e5488ccedc4e2e2
+   Main PID: 523 (tee-supplicant)
+      Tasks: 4 (limit: 2100)
+     Memory: 10.3M (peak: 11.3M)
+        CPU: 1.798s
+     CGroup: /system.slice/system-tee\x2dsupplicant.slice/tee-supplicant@teepriv0.service
+             `-523 /usr/sbin/tee-supplicant
+
+Mar 13 15:35:16 imx93-11x11-frdm systemd[1]: Starting TEE Supplicant on teepriv0...
+Mar 13 15:35:17 imx93-11x11-frdm (tee-supplicant)[523]: tee-supplicant@teepriv0.service: Referenced but unset environment variable evaluates to an empty string: OPTARGS
+Mar 13 15:35:17 imx93-11x11-frdm systemd[1]: Started TEE Supplicant on teepriv0.
+```
+
+Then, tests can be run:
+
+```
+root@imx93-11x11-frdm:~# xtest
+Run test suite with level=0
+
+TEE test application started over default TEE instance
+######################################################
+#
+# regression+pkcs11+regression_nxp
+#
+######################################################
+
+<...>
+
+61575 subtests of which 35 failed
+161 test cases of which 31 failed
+0 test cases were skipped
+TEE test application done!
+```
+
+No need to bother about faile tests and cases for now, the important thing is that OP-TEE is up and running.
 
 ### To be continued...
 
@@ -1805,7 +2056,9 @@ hope that it will solve itself when the kernel size will be tuned.
 - [i.MX93 FRDM design files](https://www.nxp.com/webapp/Download?colCode=FRDM-iMX93-DESIGNFILES)
 - [Trusted Firmware documentation](https://trustedfirmware-a.readthedocs.io/en/latest/design/firmware-design.html)
 - [U-Boot Falcon Mode](https://docs.u-boot.org/en/v2026.04/develop/falcon.html)
+- [OP-TEE documentation](https://optee.readthedocs.io/en/latest/general/about.html)
 - [FIT specifications](https://fitspec.osfw.foundation/)
+- [Linux kernel ARM64 boot specs](https://www.kernel.org/doc/Documentation/arm64/booting.txt)
 
 ## License
 

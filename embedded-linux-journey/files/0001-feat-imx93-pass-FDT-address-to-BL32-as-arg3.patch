@@ -1,0 +1,37 @@
+From cc15d2bd83f6c02a2f4060e3f05f812ef8396092 Mon Sep 17 00:00:00 2001
+From: Francesco Valla <francesco@valla.it>
+Date: Sun, 3 May 2026 15:23:46 +0200
+Subject: [PATCH] feat(imx93): pass FDT address to BL32 as arg3
+
+Signed-off-by: Francesco Valla <francesco@valla.it>
+---
+ plat/imx/imx93/imx93_bl31_setup.c | 9 +--------
+ 1 file changed, 1 insertion(+), 8 deletions(-)
+
+diff --git a/plat/imx/imx93/imx93_bl31_setup.c b/plat/imx/imx93/imx93_bl31_setup.c
+index 4e1b7513ff88..036498a3dce7 100644
+--- a/plat/imx/imx93/imx93_bl31_setup.c
++++ b/plat/imx/imx93/imx93_bl31_setup.c
+@@ -94,18 +94,11 @@ void bl31_early_platform_setup2(u_register_t arg0, u_register_t arg1,
+ 	bl32_image_ep_info.pc = BL32_BASE;
+ 	bl32_image_ep_info.spsr = 0;
+ 
+-	/* Pass TEE base and size to bl33 */
+-	bl33_image_ep_info.args.arg1 = BL32_BASE;
+-	bl33_image_ep_info.args.arg2 = BL32_SIZE;
+-
+ #ifdef SPD_trusty
+ 	bl32_image_ep_info.args.arg0 = BL32_SIZE;
+ 	bl32_image_ep_info.args.arg1 = BL32_BASE;
+ #else
+-	/* Make sure memory is clean */
+-	mmio_write_32(BL32_FDT_OVERLAY_ADDR, 0);
+-	bl33_image_ep_info.args.arg3 = BL32_FDT_OVERLAY_ADDR;
+-	bl32_image_ep_info.args.arg3 = BL32_FDT_OVERLAY_ADDR;
++	bl32_image_ep_info.args.arg3 = PLAT_NS_FDT_OFFSET;
+ #endif
+ #endif
+ 	imx_bl31_params_parse(arg0, OCRAM_BASE, OCRAM_SIZE,
+-- 
+2.54.0
+
