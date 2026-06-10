@@ -39,3 +39,9 @@ can be run with a simple:
 > The `--basetemp=$(pwd)/tmpdir` instruction is not strictly required, but can
   help whenever the space reserved for `/tmp` is limited (e.g., when the test
   fail with `Disk quota exceeded`).
+
+### Sandbox tests for SPL
+
+```sh
+./test/py/test.py --bd sandbox_spl --build --basetemp=$(pwd)/tmpdir -v
+```
