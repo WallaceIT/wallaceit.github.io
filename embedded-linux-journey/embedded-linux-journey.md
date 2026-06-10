@@ -2,7 +2,7 @@
 
 > **WARNING**: this is a Work In Progress! The content is subject to change with no notice.
 
-**Last update**: 2026-05-03
+**Last update**: 2026-06-10
 
 ## Introduction
 
@@ -2048,6 +2048,188 @@ TEE test application done!
 
 No need to bother about faile tests and cases for now, the important thing is that OP-TEE is up and running.
 
+### Day 10: Zephyr
+
+**TL;DR**: the Zephyr RTOS is built for the Cortex-M33 present on the i.MX93 and OpenAMP-based IPC is brought up.
+
+Zephyr is a good candidate for a RTOS to be run on the Cortex-M33 co-processor that is present inside the i.MX93 Soc;
+while this is not part of the initial plan, it's worth exploring it at this point of the journey, while fiddling with
+boot routines and such.
+
+The Zephyr environment setup is out of scope for this writeup, also considering that the
+[official documentation](https://docs.zephyrproject.org/latest/develop/getting_started/index.html) is clear and pretty
+complete. Once the environment is ready, it is sufficient to use the `frdm_imx93/mimx9352/m33` platform to obtain
+binaries suitable for the M33:
+
+```sh
+west build -p always -b frdm_imx93/mimx9352/m33 samples/hello_world
+```
+
+Once a `zephyr.elf` file has been obtained, it's time to load and start it. The NXP documentation suggests to do so
+from the U-Boot proper console, that is no more present on the system; this leaves two possibilities:
+
+  - an early boot where the M33 processor is loaded as part of the FIT image and then started by the TF-A;
+  - a late boot performed by the Linux kernel.
+
+While the first can be very interesting for time-costrained environment, let's start with the second one.
+
+The theory states that it should be possible to boot a firmware that is already present under `/lib/firmware` as:
+
+```sh
+echo zephyr.elf > /sys/class/remoteproc/remoteproc0/firmware
+echo start > /sys/class/remoteproc/remoteproc0/state
+```
+
+This however quickly proves to be not true, due to the _peculiar_ way the M33 clock is managed on the i.MX93; some
+digging reveals that the `clk-imx93.mcore_booted` argument shall be inserted into the Linux kernel cmdline to
+prevent the clock framework to disable the Cortex-M33 root clock. Once that is done, Zephyr happily boots and greets on
+the UART2 serial line (i.e., `/dev/ttyACM1` on the Author's machine):
+
+```
+*** Booting Zephyr OS build v4.4.0-4957-g53c0280c6a37 ***
+Hello World! frdm_imx93/mimx9352/m33
+```
+
+#### OpenAMP
+
+By default, the TRDC configuration done by the TF-A forbids the Cortex-M33 processor to access the DDR memory.
+This prevents all the interesting usecases, such as:
+
+- complex M33 firmware running from DDR;
+- M33-A55 communication over shared DDR using OpenAMP.
+
+As reported inside the
+[Zephyr documentation for the i.MX93 EVK](https://docs.zephyrproject.org/latest/boards/nxp/imx93_evk/doc/index.html#programming-and-debugging-m33),
+the TF-A needs to be patched for the DDR to be accessible from the Cortex-M33 processor:
+
+```patch
+diff --git a/plat/imx/imx93/trdc_config.h b/plat/imx/imx93/trdc_config.h
+index f5057fe14d97..7b957bb24a7d 100644
+--- a/plat/imx/imx93/trdc_config.h
++++ b/plat/imx/imx93/trdc_config.h
+@@ -16,7 +16,7 @@
+ /* aonmix */
+ struct trdc_glbac_config trdc_a_mbc_glbac[] = {
+        /* MBC0 */
+-       { 0, 0, SP(RW)  | SU(RW)   | NP(RW)  | NU(RW) },
++       { 0, 0, SP(RWX) | SU(RW)   | NP(RW)  | NU(RW) },
+        /* MBC1 */
+        { 1, 0, SP(RW)  | SU(RW)   | NP(RW)  | NU(RW) },
+        { 1, 1, SP(RW)  | SU(R)    | NP(RW)  | NU(R)  },
+@@ -361,7 +361,7 @@ struct trdc_glbac_config trdc_n_mrc_glbac[] = {
+ struct trdc_mrc_config trdc_n_mrc[] = {
+        { 0, 0, 0, 0x80000000, 0x80000000, 0, false }, /* MRC0 DRAM for S400 DID0 */
+        { 0, 1, 0, 0x80000000, 0x80000000, 0, false }, /* MRC0 DRAM for MTR DID1 */
+-       { 0, 2, 0, 0x80000000, 0x80000000, 0, true }, /* MRC0 DRAM for M33 DID2 */
++       { 0, 2, 0, 0x80000000, 0x80000000, 1, true }, /* MRC0 DRAM for M33 DID2 */
+        { 0, 8, 0, 0x80000000, 0x80000000, 1, false }, /* MRC0 DRAM for Coresight, Testport DID8 */
+        { 0, 9, 0, 0x80000000, 0x80000000, 1, false }, /* MRC0 DRAM for DAP DID9 */
+ 
+@@ -392,7 +392,7 @@ struct trdc_mrc_config trdc_n_mrc[] = {
+ struct trdc_mrc_config trdc_n_mrc[] = {
+        { 0, 0, 0, 0x80000000, 0x80000000, 0, false }, /* MRC0 DRAM for S400 DID0 */
+        { 0, 1, 0, 0x80000000, 0x80000000, 0, false }, /* MRC0 DRAM for MTR DID1 */
+-       { 0, 2, 0, 0x80000000, 0x80000000, 0, true }, /* MRC0 DRAM for M33 DID2 */
++       { 0, 2, 0, 0x80000000, 0x80000000, 1, true }, /* MRC0 DRAM for M33 DID2 */
+        { 0, 3, 0, 0x80000000, 0x80000000, 1, false }, /* MRC0 DRAM for A55 DID3 */
+        { 0, 5, 0, 0x80000000, 0x80000000, 0, false }, /* MRC0 DRAM for USDHC1 DID5 */
+        { 0, 6, 0, 0x80000000, 0x80000000, 0, false }, /* MRC0 DRAM for USDHC2 DID6 */
+```
+
+Once this is done, the `openamp_rsc_table` example can be used...but only after the DDR regions to
+be accessed are defined inside Zephyr's devicetree. Following what has been discovered about the
+[Inter-Processor communication](#inter-processor-communication), the `ipc.overlay` overlay (pretty
+much equal to the one already present for the i.MX93 EVK) can be produced:
+
+```dts
+/ {
+	chosen {
+		/*
+		 * shared memory reserved for the inter-processor communication
+		 */
+		zephyr,ipc_shm = &shmem;
+		zephyr,ipc_rsc_table = &rsc_table;
+		zephyr,ipc = &mailbox0;
+	};
+
+	shmem: memory@a4000000 {
+		compatible = "mmio-sram";
+		reg = <0xa4000000 0x500000>;
+	};
+
+	rsc_table: memory@2001e000 {
+		compatible = "mmio-sram";
+		reg = <0x2001e000 0x100>;
+	};
+
+	mailbox0: mailbox {
+		compatible = "zephyr,mbox-ipm";
+		mboxes = <&mu1 1>, <&mu1 1>;
+		mbox-names = "tx", "rx";
+	};
+};
+
+&mu1 {
+	status = "okay";
+};
+```
+
+This, along with some configs:
+
+```
+CONFIG_IPM_MBOX=y
+CONFIG_MBOX_INIT_PRIORITY=0
+CONFIG_OPENAMP_COPY_RSC_TABLE=y
+```
+
+and a different compilation command (which considers the new `ipc.overlay` overlay):
+
+```
+west build -p always -b frdm_imx93/mimx9352/m33 samples/subsys/ipc/openamp_rsc_table -- -DEXTRA_DTC_OVERLAY_FILE=ipc.overlay
+```
+
+lead to the OpenAMP example starting on the M33:
+
+```
+*** Booting Zephyr OS build v4.4.0-4957-g53c0280c6a37 ***
+I: Starting application threads!
+I: OpenAMP[remote] Linux responder demo started
+
+uart:~$
+```
+
+However, no rpmsg service can be seen at Linux side. Some hours[^3] later, the reason finally reveals
+itself: before the firmware starts, the resource table is copied from the ELF file to the memory
+area dedicated to it, then overwritten by Zephyr, but only after some modification has already been
+done. This collision causes the "ready" flag for the virtio device to be lost. A temporary workaround,
+while a proper solution is found, is to build the Linux `virtio_rpmsg_bus` driver as a module; its
+late initialization removes the collision on the resource table, leading to a full initialization
+both at Zephyr side:
+
+```
+** Booting Zephyr OS build v4.4.0-4957-g53c0280c6a37 ***
+I: Starting application threads!
+I: OpenAMP[remote] Linux responder demo started
+I: OpenAMP[remote] Linux sample client responder started
+I: OpenAMP[remote] Linux TTY responder started
+```
+
+and Linux side:
+
+```
+[   28.878133] remoteproc remoteproc0: table loaded at 000000002dd144d7
+[   28.878210] rproc-virtio rproc-virtio.1.auto: assigned reserved memory node vdevbuffer@a4020000
+[   28.878334] rproc-virtio rproc-virtio.1.auto: registered virtio0 (type 7)
+[   28.878349] remoteproc remoteproc0: remote processor imx-rproc is now up
+[   28.897604] virtio_rpmsg_bus virtio0: virtqueue notify
+[   28.899189] virtio_rpmsg_bus virtio0: rpmsg host is online
+[   28.902416] virtio_rpmsg_bus virtio0: creating channel rpmsg-tty addr 0x400
+[   28.910606] virtio_rpmsg_bus virtio0: creating channel rpmsg-client-sample addr 0x401
+[   28.911427] virtio_rpmsg_bus virtio0: creating channel rpmsg-tty addr 0x402
+```
+
+
+
 ### To be continued...
 
 ## Referenced documents
@@ -2100,3 +2282,5 @@ SOFTWARE.
 [^1]: But this [counts as work time](https://xkcd.com/303), right?
 
 [^2]: In practice, _while_ this was being written.
+
+[^3]: Roughly 3. Yes, someone already pointed out the fact to the Author.
