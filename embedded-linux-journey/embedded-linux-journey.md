@@ -2124,7 +2124,7 @@ index f5057fe14d97..7b957bb24a7d 100644
 +       { 0, 2, 0, 0x80000000, 0x80000000, 1, true }, /* MRC0 DRAM for M33 DID2 */
         { 0, 8, 0, 0x80000000, 0x80000000, 1, false }, /* MRC0 DRAM for Coresight, Testport DID8 */
         { 0, 9, 0, 0x80000000, 0x80000000, 1, false }, /* MRC0 DRAM for DAP DID9 */
- 
+
 @@ -392,7 +392,7 @@ struct trdc_mrc_config trdc_n_mrc[] = {
  struct trdc_mrc_config trdc_n_mrc[] = {
         { 0, 0, 0, 0x80000000, 0x80000000, 0, false }, /* MRC0 DRAM for S400 DID0 */
@@ -2228,7 +2228,94 @@ and Linux side:
 [   28.911427] virtio_rpmsg_bus virtio0: creating channel rpmsg-tty addr 0x402
 ```
 
+### Interlude: Fun with Open-EP
 
+While not foreseen during the planning of the journey, a possibility that the i.MX93 FRDM offers is
+to drive a e-ink panel through the SPI interface present on the 40-pin header. The Author came into
+possession of a Pixpaper 4.26" e-ink panel from [Open-EP](https://www.open-ep.org/) and decided to
+pause his journey and have some fun with it.
+
+#### Hardware interfacing
+
+The e-ink module can be connected to the board through a 3-wire (MOSI, SCK, CS#) SPI interface
+plus some additional signals (DC#, RST# and BUSY); the interface uses a 3.3V logic level, the same
+as the i.MX93 FRDM, and thus no level translation is required.
+
+The following connections are made:
+
+| Display | i.MX93 FRDM |
+| ------- | ----------- |
+| MOSI    | SPI3 MOSI (pin 19) |
+| SCK     | SPI3 CLK (pin 21) |
+| CS#     | GPIO2_8 (pin 24) |
+| DC#     | GPIO2_5 (pin 29) |
+| RST#    | GPIO2_26 (pin 19) |
+| BUSY    | GPIO2_6 (pin 37) |
+
+#### Software interfacing
+
+No mainline driver is (yet) integrated into the mainline Linux kernel, but
+[a patch](https://lore.kernel.org/all/20260529-bar-v3-0-5c2ac1c751ee@gmail.com/) has been sent some
+time ago to integrate the Pixpaper panel as a DRM device (which should be the one and only method to
+integrate any display).
+While this version is not going to be integrated, since another, more generic driver for the controller
+[is in the works](https://lore.kernel.org/all/2bfb73e6-dca3-4d93-af04-3c644929dd19@ti.com/),
+it can be temporarly cherry-picked (and rebased onto the current mainline) to try the panel.
+
+In addition to the driver, which has to be enabled setting `CONFIG_DRM_PIXPAPER_426M=m`, an
+addition to the i.MX93 FRDM devicetree shall be done, to configure the required pins, enable the
+SPI interface and finally add the panel node:
+
+```dts
+&iomuxc {
+	pinctrl_epd_ctrl: epdctrlgrp {
+		fsl,pins = <
+			MX93_PAD_GPIO_IO05__GPIO2_IO05		0x31e /* DC pin */
+			MX93_PAD_GPIO_IO06__GPIO2_IO06		0x31e /* RESET pin */
+			MX93_PAD_GPIO_IO26__GPIO2_IO26		0x31e /* BUSY pin */
+		>;
+	};
+
+	pinctrl_lpspi3: lpspi3grp {
+		fsl,pins = <
+			MX93_PAD_GPIO_IO08__GPIO2_IO08		0x3fe /* SPI3 CE0 */
+			MX93_PAD_GPIO_IO09__LPSPI3_SIN		0x3fe /* SPI3 MISO */
+			MX93_PAD_GPIO_IO10__LPSPI3_SOUT		0x3fe /* SPI3 MOSI */
+			MX93_PAD_GPIO_IO11__LPSPI3_SCK		0x3fe /* SPI3 CLK */
+		>;
+	};
+};
+
+&lpspi3 {
+	#address-cells = <1>;
+	#size-cells = <0>;
+	cs-gpios = <&gpio2 8 GPIO_ACTIVE_LOW>;
+	pinctrl-0 = <&pinctrl_lpspi3>, <&pinctrl_epd_ctrl>;
+	pinctrl-names = "default";
+	status = "okay";
+
+	display@0 {
+		compatible = "mayqueen,pixpaper-426m";
+		reg = <0>;
+		busy-gpios = <&gpio2 26 GPIO_ACTIVE_HIGH>;
+		dc-gpios = <&gpio2 5 GPIO_ACTIVE_HIGH>;
+		reset-gpios = <&gpio2 6 GPIO_ACTIVE_HIGH>;
+		spi-max-frequency = <1000000>;
+	};
+};
+```
+
+#### The result
+
+After a rebuild and reflash, the screen starts as expected and shows the (emulated) framebuffer
+console, as expected:
+
+![Pixpaper 4.26" e-ink display](files/pixpaper.jpg)
+
+#### Files
+
+The patch for the DRM driver, rebased onto the 7.2-rc2 Linux kernel, can be found
+[here](files/0001-drm-tiny-add-support-for-PIXPAPER-4.26-monochrome-e-.patch).
 
 ### To be continued...
 
